@@ -1,6 +1,6 @@
 # Quilden Sync
 
-**Quilden Sync** is a free Obsidian plugin that syncs your vault to a GitHub repository with optional zero-knowledge end-to-end encryption. Combined with [Quilden](https://quilden.app) — a web-based Obsidian-style editor — your notes become accessible from any device or network, without installing anything.
+**Quilden Sync** is a free Obsidian plugin that syncs your vault to a GitHub repository with optional zero-knowledge end-to-end encryption. Combined with [Quilden](https://quilden.com) — a web-based Obsidian-style editor — your notes become accessible from any device or network, without installing anything.
 
 ---
 
@@ -86,7 +86,7 @@ Quilden Sync uses the Web Crypto API — the same API built into every modern br
 2. A key is derived using **PBKDF2** (SHA-256, 600,000 iterations) with a salt computed from `SHA-256("quilden:{github_login}/{owner}/{repo}")` — deterministic, nothing stored in the repo
 3. Every file is encrypted with **AES-256-GCM** before being committed to GitHub
 4. Encrypted files are prefixed with `QENC:1:` so both the plugin and the Quilden web editor can identify and decrypt them
-5. When you open your vault in [Quilden](https://quilden.app), enter the same password — decryption happens entirely in your browser
+5. When you open your vault in [Quilden](https://quilden.com), enter the same password — decryption happens entirely in your browser
 
 ### Encryption scope
 
@@ -127,10 +127,10 @@ Restores use GitHub's commit history, so no data is ever permanently lost.
 
 ## Connecting to Quilden (Web Editor)
 
-[Quilden](https://quilden.app) is a web-based Obsidian-style editor that reads your GitHub-backed vault directly from the browser.
+[Quilden](https://quilden.com) is a web-based Obsidian-style editor that reads your GitHub-backed vault directly from the browser.
 
 1. Install Quilden Sync and complete at least one sync
-2. Visit [quilden.app](https://quilden.app) and sign in with GitHub
+2. Visit [quilden.com](https://quilden.com) and sign in with GitHub
 3. Select the repository your vault syncs to
 4. If encryption is enabled, enter your password — decryption is local, nothing is sent to Quilden's servers
 5. Edit your notes from any browser — work computer, school Chromebook, or borrowed device
