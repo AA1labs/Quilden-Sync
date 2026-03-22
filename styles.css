@@ -1,0 +1,1326 @@
+/* Quilden Sync - Obsidian Plugin Styles */
+
+
+/* ── Status bar ── */
+.quilden-sync-status {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  cursor: pointer;
+}
+
+.lm-status-icon {
+  display: inline-block;
+  line-height: 1;
+}
+
+@keyframes lm-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+.lm-spinning {
+  animation: lm-spin 0.9s linear infinite;
+}
+
+.lm-status-msg {
+  font-size: 11px;
+  color: var(--text-muted);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Sync history popup ── */
+.lm-sync-popup-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+}
+
+.lm-sync-popup {
+  position: absolute;
+  z-index: 9999;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: none;
+  min-width: 260px;
+  max-width: 340px;
+  max-height: 380px;
+  overflow-y: auto;
+  font-size: 13px;
+}
+
+.lm-sync-popup-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px 8px;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-normal);
+  border-bottom: 1px solid var(--background-modifier-border);
+  position: sticky;
+  top: 0;
+  background: var(--background-primary);
+}
+
+.lm-sync-popup-close {
+  background: none;
+  border: none;
+  font-size: 12px;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  line-height: 1;
+}
+
+.lm-sync-popup-close:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.lm-sync-entry {
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.lm-sync-entry:last-child {
+  border-bottom: none;
+}
+
+.lm-sync-entry-time {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-normal);
+  margin-bottom: 2px;
+}
+
+.lm-sync-entry-stats {
+  font-size: 11px;
+  color: var(--interactive-accent);
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+
+.lm-sync-entry-files {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.7;
+  white-space: pre-line;
+}
+
+.lm-sync-empty {
+  padding: 16px 14px;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+  text-align: center;
+}
+
+/* ── Settings page ── */
+.lm-settings-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.lm-settings-title-row h2 {
+  margin: 0;
+}
+
+.lm-settings-title-link {
+  font-size: 13px;
+  color: var(--text-accent);
+  text-decoration: none;
+}
+
+.lm-settings-title-link:hover {
+  text-decoration: underline;
+}
+
+.lm-settings-section {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  padding: 14px 16px 6px;
+  margin-bottom: 20px;
+}
+
+.lm-settings-section-title {
+  margin: 0 0 8px;
+}
+
+.quilden-sync-settings .setting-item {
+  margin-bottom: 16px;
+}
+
+.quilden-sync-settings .setting-item-heading {
+  margin-top: 24px;
+}
+
+/* ── Connection card ── */
+.lm-connect-card {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+.lm-connect-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--text-normal);
+}
+
+.lm-connect-subtitle {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: 0 0 20px 0;
+  line-height: 1.5;
+}
+
+.lm-inline-branch-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.lm-inline-branch-label,
+.lm-inline-branch-status {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.lm-inline-branch-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-accent);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.lm-inline-branch-button:hover {
+  text-decoration: underline;
+}
+
+.lm-inline-branch-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.lm-inline-branch-controls.is-hidden {
+  display: none;
+}
+
+.lm-inline-branch-dropdown select {
+  min-width: 140px;
+}
+
+/* Steps */
+.lm-step {
+  border-left: 2px solid var(--interactive-accent);
+  padding-left: 14px;
+  margin-bottom: 20px;
+}
+
+.lm-step-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--interactive-accent);
+  margin-bottom: 3px;
+}
+
+.lm-step-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-normal);
+  margin-bottom: 6px;
+}
+
+.lm-step-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+  line-height: 1.5;
+}
+
+/* ── Permission checklist ── */
+.lm-perm-list {
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+
+.lm-perm-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.lm-perm-row:last-child {
+  border-bottom: none;
+}
+
+.lm-perm-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+  width: 20px;
+  text-align: center;
+}
+
+.lm-perm-text {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.lm-perm-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-normal);
+  min-width: 110px;
+}
+
+.lm-perm-value {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.lm-open-github-btn {
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  color: var(--text-normal);
+}
+
+/* Token input row */
+.lm-token-wrap {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.lm-token-input {
+  flex: 1;
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: 13px;
+  font-family: var(--font-monospace);
+  outline: none;
+}
+
+.lm-token-input:focus {
+  border-color: var(--interactive-accent);
+}
+
+.lm-connect-btn {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border: none;
+  border-radius: 6px;
+  padding: 7px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 0.15s;
+}
+
+.lm-connect-btn:hover {
+  opacity: 0.88;
+}
+
+.lm-connect-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.lm-connect-error {
+  font-size: 12px;
+  color: var(--text-error);
+  margin-top: 6px;
+  min-height: 16px;
+}
+
+/* ── Connected state ── */
+.lm-connect-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.lm-avatar-placeholder {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.lm-connect-info {
+  flex: 1;
+}
+
+.lm-username {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.lm-connect-label {
+  font-size: 11px;
+  color: var(--color-green, #4caf50);
+}
+
+.lm-disconnect-btn {
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.lm-disconnect-btn:hover {
+  color: var(--text-error);
+}
+
+.lm-divider {
+  height: 1px;
+  background: var(--background-modifier-border);
+  margin: 14px 0;
+}
+
+/* ── Selected repo badge ── */
+.lm-selected-repo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 7px 10px;
+  margin-bottom: 10px;
+}
+
+.lm-repo-icon-svg {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.lm-selected-repo-name {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-normal);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lm-branch-select-inline {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: 11px;
+  outline: none;
+  cursor: pointer;
+  max-width: 110px;
+}
+
+.lm-branch-select-inline:focus {
+  border-color: var(--interactive-accent);
+  color: var(--text-normal);
+}
+
+.lm-change-btn {
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.lm-change-btn:hover {
+  color: var(--interactive-accent);
+}
+
+/* ── Repo search ── */
+.lm-search-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.lm-refresh-btn {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+
+.lm-refresh-btn:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.lm-search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: 7px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: 13px;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.lm-search-input:focus {
+  border-color: var(--interactive-accent);
+}
+
+.lm-search-status {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  min-height: 18px;
+}
+
+.lm-repo-list {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 7px;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.lm-repo-item {
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--background-modifier-border);
+  transition: background 0.1s;
+}
+
+.lm-repo-item:last-child {
+  border-bottom: none;
+}
+
+.lm-repo-item:hover {
+  background: var(--background-modifier-hover);
+}
+
+.lm-repo-icon {
+  display: flex;
+  align-items: center;
+  margin-right: 6px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.lm-repo-name {
+  font-size: 13px;
+  color: var(--text-normal);
+}
+
+.lm-repo-empty,
+.lm-repo-more {
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* ── Create new repo ── */
+.lm-create-repo-row {
+  margin-bottom: 8px;
+}
+
+.lm-create-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-size: 12px;
+  color: var(--interactive-accent);
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.lm-create-toggle-btn:hover {
+  opacity: 0.8;
+}
+
+.lm-create-form {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 12px;
+  margin-top: 8px;
+}
+
+.lm-create-input {
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: 13px;
+  outline: none;
+  box-sizing: border-box;
+  margin-bottom: 10px;
+}
+
+.lm-create-input:focus {
+  border-color: var(--interactive-accent);
+}
+
+.lm-vis-row {
+  margin-bottom: 10px;
+}
+
+.lm-vis-label {
+  font-size: 13px;
+  color: var(--text-normal);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.lm-create-repo-btn {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border: none;
+  border-radius: 6px;
+  padding: 7px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.lm-create-repo-btn:hover { opacity: 0.88; }
+.lm-create-repo-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* ── Branch section ── */
+.lm-branch-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 4px 0;
+}
+
+/* Repo / Branch pickers */
+.lm-field-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.lm-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-normal);
+  width: 70px;
+  flex-shrink: 0;
+}
+
+.lm-field-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lm-select {
+  flex: 1;
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: 13px;
+  outline: none;
+  cursor: pointer;
+}
+
+.lm-select:focus {
+  border-color: var(--interactive-accent);
+}
+
+.lm-field-status {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* ── Open Quilden website button ── */
+.lm-open-web-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.lm-open-web-btn {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border: none;
+  border-radius: 6px;
+  padding: 7px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.lm-open-web-btn:hover { opacity: 0.88; }
+.lm-open-web-btn:disabled { opacity: 0.5; cursor: default; }
+
+.lm-open-web-status {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* ── No account nudge ── */
+.lm-no-account {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 14px;
+}
+
+.lm-link {
+  color: var(--interactive-accent);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+/* ── Encryption status ── */
+.encryption-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+
+.encryption-status.active {
+  background: rgba(76, 175, 80, 0.1);
+  color: var(--text-success);
+}
+
+.encryption-status.inactive {
+  background: var(--background-secondary);
+  color: var(--text-muted);
+}
+
+.quilden-not-connected-hint {
+  font-size: 13px;
+  color: var(--text-muted);
+  padding: 16px 12px;
+  text-align: center;
+}
+
+.enc-saved-pw-display {
+  width: 100px;
+  color: var(--text-muted);
+  background: var(--background-modifier-form-field);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 14px;
+  letter-spacing: 2px;
+  cursor: default;
+  opacity: 0.7;
+}
+
+.enc-toggle-change-msg {
+  font-size: 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin: 2px 0 8px;
+  line-height: 1.5;
+}
+
+.enc-toggle-change-msg--on {
+  background: rgba(var(--color-green-rgb, 34, 160, 99), 0.1);
+  color: var(--color-green, #22a063);
+}
+
+.enc-toggle-change-msg--off {
+  background: rgba(var(--color-yellow-rgb, 224, 172, 40), 0.12);
+  color: var(--color-yellow, #b58a00);
+}
+
+.theme-dark .enc-toggle-change-msg--on {
+  background: rgba(34, 160, 99, 0.15);
+  color: #4cca87;
+}
+
+.theme-dark .enc-toggle-change-msg--off {
+  background: rgba(224, 172, 40, 0.15);
+  color: #e0ac28;
+}
+
+.enc-toggle-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 6px 12px 10px;
+  margin-top: -6px;
+}
+
+.enc-feedback-ok {
+  font-size: 12px;
+  color: var(--text-success);
+  padding: 6px 12px;
+}
+
+.enc-feedback-err {
+  font-size: 12px;
+  color: var(--text-error);
+  padding: 6px 12px;
+}
+
+/* ── File History Modal ── */
+.lm-history-modal .modal-content {
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.lm-history-title {
+  font-size: 15px;
+  font-weight: 600;
+  padding: 14px 20px 10px;
+  margin: 0;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+  color: var(--text-normal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lm-history-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.lm-history-left {
+  width: 240px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--background-modifier-border);
+  overflow-y: auto;
+}
+
+.lm-history-right {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.lm-history-diff {
+  flex: 1;
+  overflow: auto;
+}
+
+.lm-history-diff-mobile {
+  max-height: 55vh;
+  overflow-y: auto;
+}
+
+/* Mobile select */
+.lm-history-mobile-select-wrap {
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  flex-shrink: 0;
+}
+
+.lm-history-mobile-select {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: 13px;
+  outline: none;
+}
+
+/* Commit list items */
+.lm-commit-item {
+  padding: 10px 14px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--background-modifier-border);
+  transition: background 0.1s;
+}
+
+.lm-commit-item:hover {
+  background: var(--background-modifier-hover);
+}
+
+.lm-commit-item.lm-commit-selected {
+  background: var(--background-modifier-active-hover);
+  border-left: 3px solid var(--interactive-accent);
+  padding-left: 11px;
+}
+
+.lm-commit-msg {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-normal);
+  margin-bottom: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lm-commit-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* Diff header */
+.lm-diff-header {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.lm-diff-commit-msg {
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.lm-diff-commit-meta {
+  color: var(--text-muted);
+}
+
+/* Diff table */
+.lm-diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-monospace);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.lm-diff-table td {
+  padding: 1px 4px;
+  vertical-align: top;
+}
+
+.lm-diff-ln {
+  width: 38px;
+  min-width: 38px;
+  text-align: right;
+  color: var(--text-faint);
+  user-select: none;
+  border-right: 1px solid var(--background-modifier-border);
+  padding-right: 6px;
+  white-space: nowrap;
+}
+
+.lm-diff-sign {
+  width: 18px;
+  min-width: 18px;
+  text-align: center;
+  user-select: none;
+  color: var(--text-muted);
+  padding: 1px 2px;
+}
+
+.lm-diff-code {
+  white-space: pre-wrap;
+  word-break: break-all;
+  padding-left: 6px;
+}
+
+/* Row types */
+.lm-diff-add {
+  background: rgba(0, 200, 100, 0.1);
+}
+
+.lm-diff-add .lm-diff-sign {
+  color: var(--color-green, #4caf50);
+  font-weight: 700;
+}
+
+.lm-diff-remove {
+  background: rgba(255, 80, 80, 0.1);
+}
+
+.lm-diff-remove .lm-diff-sign {
+  color: var(--text-error);
+  font-weight: 700;
+}
+
+.lm-diff-collapse {
+  background: var(--background-secondary);
+  color: var(--text-faint);
+  font-style: italic;
+  font-family: var(--font-interface);
+}
+
+.lm-diff-collapse .lm-diff-code {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+/* Status / error */
+.lm-history-status {
+  padding: 16px 14px;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.lm-history-error {
+  padding: 16px 14px;
+  font-size: 12px;
+  color: var(--text-error);
+}
+
+/* Footer */
+.lm-history-footer {
+  padding: 10px 20px;
+  border-top: 1px solid var(--background-modifier-border);
+  display: flex;
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+
+.lm-restore-btn {
+  padding: 7px 20px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 6px;
+}
+
+/* ── Branch Timeline Modal ─────────────────────────────────────────────────── */
+.lm-timeline-modal {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 20px 20px 0;
+  box-sizing: border-box;
+}
+
+.lm-timeline-title {
+  font-size: 15px;
+  font-weight: 700;
+  margin: 0 0 6px;
+  color: var(--text-normal);
+}
+
+.lm-timeline-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 0 0 14px;
+  line-height: 1.5;
+}
+
+.lm-timeline-scroll {
+  flex: 1;
+  overflow-y: auto;
+  margin: 0 -20px;
+  padding: 0 20px 8px;
+}
+
+.lm-timeline-list {
+  padding: 4px 0;
+}
+
+.lm-timeline-footer {
+  padding: 12px 0 16px;
+  border-top: 1px solid var(--background-modifier-border);
+  display: flex;
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+
+/* Timeline items */
+.lm-timeline-item {
+  display: flex;
+  gap: 14px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.lm-timeline-item:hover:not(.lm-timeline-item-head) {
+  background: var(--background-secondary);
+}
+
+.lm-timeline-item-selected {
+  background: rgba(var(--color-accent-hsl), 0.08) !important;
+  border-color: var(--interactive-accent) !important;
+}
+
+.lm-timeline-item-head {
+  opacity: 0.8;
+}
+
+/* Node column (vertical line + dot) */
+.lm-timeline-node-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 18px;
+  flex-shrink: 0;
+  padding-top: 4px;
+}
+
+.lm-timeline-node {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--text-faint);
+  background: var(--background-primary);
+  flex-shrink: 0;
+  transition: border-color 0.12s;
+}
+
+.lm-timeline-node-head {
+  border-color: var(--interactive-accent);
+  background: var(--interactive-accent);
+}
+
+.lm-timeline-item-selected .lm-timeline-node {
+  border-color: var(--interactive-accent);
+  background: var(--interactive-accent);
+}
+
+.lm-timeline-connector {
+  flex: 1;
+  width: 2px;
+  background: var(--background-modifier-border);
+  min-height: 14px;
+  margin: 3px 0;
+}
+
+/* Content column */
+.lm-timeline-content {
+  flex: 1;
+  min-width: 0;
+  padding-bottom: 6px;
+}
+
+.lm-timeline-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--interactive-accent);
+  background: rgba(var(--color-accent-hsl), 0.12);
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-bottom: 4px;
+}
+
+.lm-timeline-msg {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-normal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 3px;
+}
+
+.lm-timeline-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  flex-wrap: wrap;
+}
+
+.lm-timeline-author {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.lm-timeline-sep {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin: 0 2px;
+}
+
+.lm-timeline-date {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.lm-timeline-sha {
+  font-size: 10px;
+  font-family: var(--font-monospace);
+  color: var(--text-faint);
+  background: var(--background-secondary);
+  padding: 1px 5px;
+  border-radius: 4px;
+  margin-left: 8px;
+}
+
+/* Top row with badge + github link */
+.lm-timeline-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  min-height: 18px;
+}
+
+/* GitHub link on each commit */
+.lm-timeline-gh-link {
+  font-size: 10px;
+  color: var(--text-faint);
+  text-decoration: none;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+
+.lm-timeline-item:hover .lm-timeline-gh-link {
+  opacity: 1;
+}
+
+.lm-timeline-gh-link:hover {
+  color: var(--interactive-accent);
+  text-decoration: underline;
+}
+
+/* Load more button */
+.lm-timeline-load-more {
+  display: block;
+  width: 100%;
+  margin: 8px 0 4px;
+  padding: 8px;
+  background: transparent;
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: 7px;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: center;
+  transition: background 0.12s, color 0.12s;
+}
+
+.lm-timeline-load-more:hover:not(:disabled) {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.lm-timeline-load-more:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Encryption collapsible heading tag */
+.quilden-collapsible-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+}
+
+.quilden-enc-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px 2px 6px;
+  border-radius: 6px;
+  line-height: 1;
+}
+
+.quilden-enc-tag svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+.quilden-enc-tag--active {
+  background: rgba(var(--color-green-rgb, 34, 160, 99), 0.15);
+  color: var(--color-green, #22a063);
+}
+
+.theme-dark .quilden-enc-tag--active {
+  background: rgba(34, 160, 99, 0.2);
+  color: #4cca87;
+}
+
+.quilden-enc-tag--locked {
+  background: rgba(var(--color-yellow-rgb, 224, 172, 40), 0.15);
+  color: var(--color-yellow, #b58a00);
+}
+
+.theme-dark .quilden-enc-tag--locked {
+  background: rgba(224, 172, 40, 0.18);
+  color: #e0ac28;
+}
+
+.quilden-enc-tag--off {
+  background: var(--background-modifier-border);
+  color: var(--text-faint);
+}
