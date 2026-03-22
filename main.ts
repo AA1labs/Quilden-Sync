@@ -3125,7 +3125,7 @@ class QuildenSyncSettingTab extends PluginSettingTab {
         })
         .addButton((btn) =>
           btn.setButtonText("Manage on GitHub").onClick(() => {
-            window.open("https://github.com/settings/installations", "_blank");
+            window.open(`${QUILDEN_BASE}/api/auth/manage-repos`, "_blank");
           })
         );
 
