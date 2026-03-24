@@ -130,6 +130,26 @@ function clearEncryptionKey(): void {
   derivedKey = null;
 }
 
+/** Export the current derivedKey as base64 for local storage. */
+async function exportDerivedKey(): Promise<string | null> {
+  if (!derivedKey) return null;
+  try {
+    const raw = await crypto.subtle.exportKey('raw', derivedKey);
+    return btoa(String.fromCharCode(...new Uint8Array(raw)));
+  } catch { return null; }
+}
+
+/** Import base64 key bytes and set as the active derivedKey. */
+async function importDerivedKey(base64: string): Promise<boolean> {
+  try {
+    const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+    derivedKey = await crypto.subtle.importKey(
+      'raw', bytes, { name: 'AES-GCM' }, true, ['encrypt', 'decrypt']
+    );
+    return true;
+  } catch { return false; }
+}
+
 function toBase64(bytes: Uint8Array): string {
   let binary = "";
   for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
@@ -369,7 +389,7 @@ async function uploadBatchBlobs(
   batch: Array<{ path: string; content: string; encoding: "utf-8" | "base64" }>,
   batchNumber: number
 ): Promise<Array<{ path: string; sha: string; mode: string }>> {
-  const concurrency = Math.min(4, batch.length);
+  const concurrency = Math.min(8, batch.length);
   const treeItems = new Array<{ path: string; sha: string; mode: string }>(batch.length);
   let nextIndex = 0;
   let completed = 0;
@@ -408,15 +428,50 @@ class GitHubAPI {
     this.branch = branch;
   }
 
-  private async request(method: string, path: string, body?: unknown): Promise<any> {
+  private async request(method: string, path: string, body?: unknown, _attempt = 0): Promise<any> {
     const url = `https://api.github.com${path}`;
-    const res = await requestUrl({
-      url,
-      method,
-      headers: ghHeaders(this.token, body ? { "Content-Type": "application/json" } : {}),
-      body: body ? JSON.stringify(body) : undefined,
-      throw: false,
-    });
+    const MAX_RETRIES = 4;
+    const RETRY_DELAYS_MS = [1000, 3000, 8000, 20000]; // exponential-ish backoff
+
+    let res: { status: number; json: any };
+    try {
+      res = await requestUrl({
+        url,
+        method,
+        headers: ghHeaders(this.token, body ? { "Content-Type": "application/json" } : {}),
+        body: body ? JSON.stringify(body) : undefined,
+        throw: false,
+      });
+    } catch (networkErr: any) {
+      // Transient network error (ERR_NETWORK_CHANGED, ERR_INTERNET_DISCONNECTED, etc.)
+      if (_attempt < MAX_RETRIES) {
+        const delay = RETRY_DELAYS_MS[_attempt];
+        console.warn(`[LM] network error on ${method} ${path} (attempt ${_attempt + 1}), retrying in ${delay}ms:`, networkErr?.message ?? networkErr);
+        await new Promise(r => setTimeout(r, delay));
+        return this.request(method, path, body, _attempt + 1);
+      }
+      throw networkErr;
+    }
+
+    // Rate-limited — respect Retry-After header or back off
+    if (res.status === 429 || res.status === 403) {
+      const retryAfter = (res as any).headers?.["retry-after"];
+      const waitMs = retryAfter ? Number(retryAfter) * 1000 : RETRY_DELAYS_MS[_attempt] ?? 20000;
+      if (_attempt < MAX_RETRIES) {
+        console.warn(`[LM] rate limited on ${method} ${path}, waiting ${waitMs}ms`);
+        await new Promise(r => setTimeout(r, waitMs));
+        return this.request(method, path, body, _attempt + 1);
+      }
+    }
+
+    // 5xx server errors — retry
+    if (res.status >= 500 && _attempt < MAX_RETRIES) {
+      const delay = RETRY_DELAYS_MS[_attempt];
+      console.warn(`[LM] server error ${res.status} on ${method} ${path} (attempt ${_attempt + 1}), retrying in ${delay}ms`);
+      await new Promise(r => setTimeout(r, delay));
+      return this.request(method, path, body, _attempt + 1);
+    }
+
     if (res.status >= 400) {
       const msg = res.json?.message ?? res.status;
       console.error(`[LM] GitHub API ${method} ${path} → ${res.status}:`, msg);
@@ -1156,6 +1211,7 @@ export default class QuildenSyncPlugin extends Plugin {
   settings: QuildenSyncSettings = DEFAULT_SETTINGS;
   private syncInterval: number | null = null;
   private saveDebounce: number | null = null;
+  private networkRetryTimer: number | null = null;
   private syncing = false;
   private statusBarEl: HTMLElement | null = null;
   private statusIconEl: HTMLElement | null = null;
@@ -1172,30 +1228,42 @@ export default class QuildenSyncPlugin extends Plugin {
     return !!this.encryptionVerifyToken;
   }
 
-  // ── Password localStorage helpers ────────────────────────────────────────
-  // Stored device-locally (not in vault files / GitHub) so the vault stays
-  // secure even if someone obtains a copy of the repo or data.json.
-  private pwStorageKey(): string {
-    return `quilden:enc-pw:${this.settings.repoOwner}/${this.settings.repoName}`;
+  // ── Encryption key localStorage helpers ──────────────────────────────────
+  // We store the DERIVED KEY BYTES (not the password) so the plaintext password
+  // is never persisted anywhere. Key bytes are device-local and scoped to one
+  // repo — unlike a password they cannot be reused on other services.
+  private encKeyStorageKey(): string {
+    return `quilden:enc-key:${this.settings.repoOwner}/${this.settings.repoName}`;
   }
 
-  loadSavedPassword(): string | null {
-    try { return window.localStorage.getItem(this.pwStorageKey()) || null; }
-    catch { return null; }
+  get hasSavedKey(): boolean {
+    try { return !!window.localStorage.getItem(this.encKeyStorageKey()); }
+    catch { return false; }
   }
 
-  savePassword(password: string): void {
-    try { window.localStorage.setItem(this.pwStorageKey(), password); }
+  /** Export current derivedKey bytes and save to localStorage. Never stores the password. */
+  async saveEncKey(): Promise<void> {
+    const exported = await exportDerivedKey();
+    if (!exported) return;
+    try {
+      window.localStorage.setItem(this.encKeyStorageKey(), exported);
+      // Migrate: remove any old plaintext password that may exist from a prior version.
+      window.localStorage.removeItem(`quilden:enc-pw:${this.settings.repoOwner}/${this.settings.repoName}`);
+    } catch { /* localStorage unavailable */ }
+  }
+
+  /** Import saved key bytes and apply as active derivedKey. Returns true on success. */
+  async loadAndApplyEncKey(): Promise<boolean> {
+    try {
+      const base64 = window.localStorage.getItem(this.encKeyStorageKey());
+      if (!base64) return false;
+      return importDerivedKey(base64);
+    } catch { return false; }
+  }
+
+  clearEncKey(): void {
+    try { window.localStorage.removeItem(this.encKeyStorageKey()); }
     catch { /* localStorage unavailable */ }
-  }
-
-  clearSavedPassword(): void {
-    try { window.localStorage.removeItem(this.pwStorageKey()); }
-    catch { /* localStorage unavailable */ }
-  }
-
-  get hasSavedPassword(): boolean {
-    return !!this.loadSavedPassword();
   }
 
   // ── SyncState localStorage helpers ───────────────────────────────────────
@@ -1233,12 +1301,9 @@ export default class QuildenSyncPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
 
-    // Auto-unlock encryption with saved password (stored in localStorage, device-local)
+    // Auto-unlock encryption using saved key bytes (never the password).
     if (this.settings.encryptionEnabled && this.isConfigured()) {
-      const saved = this.loadSavedPassword();
-      if (saved) {
-        this.tryUnlockEncryption(saved).catch(() => {});
-      }
+      this.loadAndApplyEncKey().catch(() => {});
     }
 
     this.statusBarEl = this.addStatusBarItem();
@@ -1331,6 +1396,7 @@ export default class QuildenSyncPlugin extends Plugin {
   onunload() {
     if (this.syncInterval !== null) window.clearInterval(this.syncInterval);
     if (this.saveDebounce !== null) window.clearTimeout(this.saveDebounce);
+    if (this.networkRetryTimer !== null) window.clearTimeout(this.networkRetryTimer);
     clearEncryptionKey();
   }
 
@@ -1942,7 +2008,7 @@ export default class QuildenSyncPlugin extends Plugin {
       new Notice("Quilden Sync: Configure your repo first.");
       return;
     }
-    console.log(`[LM] openFileHistory: token=${githubToken.slice(0, 8)}… repo=${repoOwner}/${repoName}@${branch}`);
+    console.log(`[LM] openFileHistory: repo=${repoOwner}/${repoName}@${branch}`);
     const api = new GitHubAPI(githubToken, repoOwner, repoName, branch);
     new FileHistoryModal(this.app, file, api, encryptionEnabled).open();
   }
@@ -1998,6 +2064,27 @@ export default class QuildenSyncPlugin extends Plugin {
     }
   }
 
+  /** Try to silently refresh the token via the server. Returns true if successful. */
+  private async tryRefreshToken(): Promise<boolean> {
+    if (!this.settings.githubUsername) return false;
+    try {
+      const res = await requestUrl({
+        url: `${QUILDEN_BASE}/api/auth/plugin-refresh`,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ login: this.settings.githubUsername, token: this.settings.githubToken }),
+        throw: false,
+      });
+      if (res.status === 200 && res.json?.token) {
+        this.settings.githubToken = res.json.token;
+        await this.saveSettings();
+        console.log("[LM] token refreshed silently");
+        return true;
+      }
+    } catch { /* network error — fall through */ }
+    return false;
+  }
+
   private async verifySyncAccess(): Promise<void> {
     const tokenCheck = await requestUrl({
       url: "https://api.github.com/user",
@@ -2007,7 +2094,21 @@ export default class QuildenSyncPlugin extends Plugin {
     });
 
     if (tokenCheck.status === 401) {
-      throw new Error("GitHub token is invalid or expired. Disconnect and reconnect.");
+      // Attempt silent refresh before giving up
+      const refreshed = await this.tryRefreshToken();
+      if (!refreshed) {
+        throw new Error("GitHub token is invalid or expired. Disconnect and reconnect.");
+      }
+      // Re-verify with new token
+      const retry = await requestUrl({
+        url: "https://api.github.com/user",
+        method: "GET",
+        headers: ghHeaders(this.settings.githubToken),
+        throw: false,
+      });
+      if (retry.status === 401) {
+        throw new Error("GitHub token is invalid or expired. Disconnect and reconnect.");
+      }
     }
 
     if (tokenCheck.status >= 400) {
@@ -2071,6 +2172,12 @@ export default class QuildenSyncPlugin extends Plugin {
       return;
     }
 
+    // Cancel any pending network-error retry — this sync supersedes it
+    if (this.networkRetryTimer !== null) {
+      window.clearTimeout(this.networkRetryTimer);
+      this.networkRetryTimer = null;
+    }
+
     console.log(`[LM] runSync(${mode}) started`);
   // Obsidian plugin callbacks run on the single JS event loop, so setting this
   // immediately after the guard is sufficient to serialize sync execution.
@@ -2113,7 +2220,20 @@ export default class QuildenSyncPlugin extends Plugin {
     } catch (e) {
       console.error("[LM] Sync error:", e);
       this.updateStatusBar("error");
-      this.notify(`Quilden Sync: Failed — ${e instanceof Error ? e.message : "Unknown error"}`, 8000);
+      const msg = e instanceof Error ? e.message : "Unknown error";
+      const isNetworkError = msg.includes("ERR_NETWORK") || msg.includes("ERR_INTERNET") || msg.includes("net::") || msg.includes("fetch");
+      if (isNetworkError) {
+        const RETRY_DELAY_S = 30;
+        this.notify(`Quilden Sync: Network lost — retrying in ${RETRY_DELAY_S}s`, 8000);
+        if (this.networkRetryTimer !== null) window.clearTimeout(this.networkRetryTimer);
+        this.networkRetryTimer = window.setTimeout(() => {
+          this.networkRetryTimer = null;
+          console.log("[LM] retrying sync after network error");
+          this.runSync(mode);
+        }, RETRY_DELAY_S * 1000);
+      } else {
+        this.notify(`Quilden Sync: Failed — ${msg}`, 8000);
+      }
       setTimeout(() => this.updateStatusBar("idle"), 5000);
     } finally {
       this.syncing = false;
@@ -2275,50 +2395,38 @@ export default class QuildenSyncPlugin extends Plugin {
       return;
     }
 
-    const BATCH_SIZE = 20;
-    let totalCommits = 0;
-    let currentSha = await api.getRef();
+    // Upload all blobs concurrently (8 workers), then create a single tree,
+    // commit, and ref update — exactly like a standard `git commit`.
+    const currentSha = await api.getRef();
+    const { treeSha } = await api.getCommit(currentSha);
+    console.log(`[LM] base tree SHA: ${treeSha}`);
 
-    for (let i = 0; i < changedFilesToPush.length; i += BATCH_SIZE) {
-      const batch = changedFilesToPush.slice(i, i + BATCH_SIZE);
-      const batchNumber = Math.floor(i / BATCH_SIZE) + 1;
-      console.log(`[LM] batch ${batchNumber}: creating blobs for`, batch.map((f) => f.path));
+    console.log(`[LM] uploading ${changedFilesToPush.length} blob(s)`);
+    const treeItems = await uploadBatchBlobs(api, changedFilesToPush, 1);
 
-      const { treeSha } = await api.getCommit(currentSha);
-      console.log(`[LM] base tree SHA: ${treeSha}`);
+    const newTreeSha = await api.createTree(treeSha, treeItems);
+    console.log(`[LM] new tree SHA: ${newTreeSha}`);
 
-      const treeItems = await uploadBatchBlobs(api, batch, batchNumber);
-
-      const newTreeSha = await api.createTree(treeSha, treeItems);
-      console.log(`[LM] new tree SHA: ${newTreeSha}`);
-
-      if (newTreeSha === treeSha) {
-        console.log("[LM] tree unchanged — skipping empty commit for this batch");
-        batch.forEach((f) => this.dirtyPaths.delete(f.path));
-        this.markFilesSynced(batch.map((f) => f.file));
-        await this.savePluginData();
-        continue;
-      }
-
+    if (newTreeSha === treeSha) {
+      console.log("[LM] push done — tree unchanged, no commit needed");
+      changedFilesToPush.forEach((f) => this.dirtyPaths.delete(f.path));
+      this.markFilesSynced(changedFilesToPush.map((f) => f.file));
+    } else {
       const timestamp = new Date().toISOString().slice(0, 19).replace("T", " ");
-      const commitSha = await api.createCommit(`${this.settings.commitMessage} - ${timestamp}`, newTreeSha, currentSha);
+      const commitSha = await api.createCommit(
+        `${this.settings.commitMessage} - ${timestamp}`,
+        newTreeSha,
+        currentSha,
+      );
       await api.updateRef(commitSha);
-      currentSha = commitSha;
-      batch.forEach((f) => {
+      changedFilesToPush.forEach((f) => {
         this.dirtyPaths.delete(f.path);
         this._syncPushedPaths.push(f.path);
       });
-      this.markFilesSynced(batch.map((f) => f.file));
-      await this.savePluginData();
-      totalCommits++;
-      console.log(`[LM] committed ${commitSha} (${batch.length} file(s) in batch)`);
+      this.markFilesSynced(changedFilesToPush.map((f) => f.file));
+      console.log(`[LM] push done — 1 commit ${commitSha} (${changedFilesToPush.length} file(s))`);
     }
-
-    if (totalCommits > 0) {
-      console.log(`[LM] push done — ${totalCommits} commit(s) created`);
-    } else {
-      console.log("[LM] push done — no commits needed (all trees identical)");
-    }
+    await this.savePluginData();
   }
 
   private pulling = false;
@@ -2333,132 +2441,142 @@ export default class QuildenSyncPlugin extends Plugin {
     let created = 0, updated = 0, unchanged = 0;
     const syncedFiles: TFile[] = [];
 
+    // ── Phase 1: determine which files need downloading (no network I/O) ──────
+    type PullTask = {
+      remote: { path: string; sha: string };
+      normalized: string;
+      action: "update" | "create";
+      existingFile?: TFile;
+    };
+    const tasks: PullTask[] = [];
+
+    for (const remote of remoteTree) {
+      if (this.shouldExclude(remote.path)) continue;
+      if (/^\.\.\/|\/\.\.\//g.test(remote.path) || remote.path.startsWith("/")) continue;
+      const firstSegment = remote.path.split("/")[0];
+      if (firstSegment.startsWith(".") && firstSegment !== ".obsidian") continue;
+
+      const normalized = normalizePath(remote.path);
+      const existing = vault.getAbstractFileByPath(normalized);
+
+      if (existing instanceof TFile) {
+        let needsUpdate: boolean;
+        if (this.settings.encryptionEnabled && shouldEncryptPath(remote.path, this.settings.encryptionScope)) {
+          needsUpdate = this.syncState.files[remote.path]?.mtime !== existing.stat.mtime
+            || !(this.syncState.files[remote.path]);
+        } else {
+          // Use cached remote SHA from syncState to skip local read when unchanged
+          const cached = this.syncState.files[remote.path];
+          if (cached && (cached as any).remoteSha === remote.sha) {
+            needsUpdate = false;
+          } else {
+            const localBytes = isBinaryPath(remote.path)
+              ? new Uint8Array(await vault.readBinary(existing))
+              : new TextEncoder().encode(await vault.read(existing));
+            const localSha = await gitBlobSha(localBytes);
+            needsUpdate = localSha !== remote.sha;
+          }
+        }
+        if (!needsUpdate) {
+          unchanged++;
+          syncedFiles.push(existing);
+          continue;
+        }
+        tasks.push({ remote, normalized, action: "update", existingFile: existing });
+      } else {
+        tasks.push({ remote, normalized, action: "create" });
+      }
+    }
+
+    // ── Phase 2: download and apply in parallel ────────────────────────────────
+    const PULL_CONCURRENCY = 8;
     this.pulling = true;
     try {
-      for (const remote of remoteTree) {
-        if (this.shouldExclude(remote.path)) continue;
-        if (/^\.\.\/|\/\.\.\//g.test(remote.path) || remote.path.startsWith("/")) continue;
-        // Skip hidden-dir paths that Obsidian's vault API can't manage
-        // (e.g. .infio_json_db/, .smtcmp_chat_histories/, .obsidian-mobile/)
-        // getAbstractFileByPath returns null for these so we'd try to create
-        // them every time and fail with "File already exists".
-        const firstSegment = remote.path.split("/")[0];
-        if (firstSegment.startsWith(".") && firstSegment !== ".obsidian") continue;
-
-        try {
-          const normalized = normalizePath(remote.path);
-          const existing = vault.getAbstractFileByPath(normalized);
-
-          if (existing instanceof TFile) {
-            // ── File exists: compare SHA before downloading anything ──
-            let needsUpdate: boolean;
-
-            if (this.settings.encryptionEnabled && shouldEncryptPath(remote.path, this.settings.encryptionScope)) {
-              // Encrypted: local is plaintext/binary, remote is ciphertext — SHAs will never match.
-              // Fall back to sync-state tracking: only download if remote SHA changed since last pull.
-              needsUpdate = this.syncState.files[remote.path]?.mtime !== existing.stat.mtime
-                || !(this.syncState.files[remote.path]);
-            } else {
-              // Unencrypted: compute local git blob SHA and compare with remote tree SHA.
-              // gitBlobSha() operates on raw bytes — identical to how git computes object SHAs.
-              const localBytes = isBinaryPath(remote.path)
-                ? new Uint8Array(await vault.readBinary(existing))
-                : new TextEncoder().encode(await vault.read(existing));
-              const localSha = await gitBlobSha(localBytes);
-              needsUpdate = localSha !== remote.sha;
-            }
-
-            if (!needsUpdate) {
-              unchanged++;
-              syncedFiles.push(existing);
-              continue;
-            }
-
-            // SHA differs — download and apply
+      let nextIdx = 0;
+      const worker = async () => {
+        while (nextIdx < tasks.length) {
+          const task = tasks[nextIdx++];
+          try {
+            const { remote, normalized, action, existingFile } = task;
             const isEncBinary = isBinaryPath(remote.path)
               && this.settings.encryptionEnabled
               && shouldEncryptPath(remote.path, this.settings.encryptionScope);
 
-            if (isBinaryPath(remote.path) && !isEncBinary) {
-              const { buffer } = await api.getBinaryContent(remote.path);
-              if (buffer.byteLength === 0 && existing.stat.size > 0) {
-                // Remote has an empty blob but local file has content.
-                // This means a previous push corrupted the remote (iCloud eviction during push).
-                // Keep local; mark as unchanged so we don't loop.
-                console.log(`[LM] pull skip ${remote.path}: remote empty, local has content (size=${existing.stat.size})`);
-                unchanged++;
-                syncedFiles.push(existing);
-                continue;
-              }
-              await vault.modifyBinary(existing, buffer);
-            } else {
-              const { content } = await api.getFileContent(remote.path);
-              let final: string | null = content;
-              if (this.settings.encryptionEnabled && derivedKey && isEncryptedContent(content)) {
-                final = await decryptContent(content);
-              }
-              if (final === null) {
-                // Decryption failed (wrong key) — leave local file untouched
-              } else if (isEncBinary) {
-                // Encrypted binary: decrypt gives us the base64 of the original bytes
-                const binaryStr = atob(final);
-                const bytes = new Uint8Array(binaryStr.length);
-                for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
-                await vault.modifyBinary(existing, bytes.buffer);
+            if (action === "update" && existingFile) {
+              if (isBinaryPath(remote.path) && !isEncBinary) {
+                const { buffer } = await api.getBinaryContent(remote.path);
+                if (buffer.byteLength === 0 && existingFile.stat.size > 0) {
+                  console.log(`[LM] pull skip ${remote.path}: remote empty, local has content`);
+                  unchanged++;
+                  syncedFiles.push(existingFile);
+                  continue;
+                }
+                await vault.modifyBinary(existingFile, buffer);
               } else {
-                await vault.modify(existing, final);
-              }
-            }
-            syncedFiles.push(existing);
-            console.log(`[LM] pull update: ${remote.path}`);
-            this._syncPulledPaths.push(remote.path);
-            updated++;
-
-          } else {
-            // ── File missing locally: ensure parent dir then create ──
-            const dir = remote.path.includes("/") ? remote.path.slice(0, remote.path.lastIndexOf("/")) : null;
-            if (dir) {
-              const dirPath = normalizePath(dir);
-              if (!vault.getAbstractFileByPath(dirPath)) {
-                try { await vault.createFolder(dirPath); } catch { /* already exists */ }
-              }
-            }
-
-            const isEncBinaryNew = isBinaryPath(remote.path)
-              && this.settings.encryptionEnabled
-              && shouldEncryptPath(remote.path, this.settings.encryptionScope);
-
-            if (isBinaryPath(remote.path) && !isEncBinaryNew) {
-              const { buffer } = await api.getBinaryContent(remote.path);
-              await vault.createBinary(normalized, buffer);
-            } else {
-              const { content } = await api.getFileContent(remote.path);
-              let final: string | null = content;
-              if (this.settings.encryptionEnabled && derivedKey && isEncryptedContent(content)) {
-                final = await decryptContent(content);
-              }
-              if (final !== null) {
-                if (isEncBinaryNew) {
-                  // Encrypted binary: decrypt gives us the base64 of the original bytes
+                const { content } = await api.getFileContent(remote.path);
+                let final: string | null = content;
+                if (this.settings.encryptionEnabled && derivedKey && isEncryptedContent(content)) {
+                  final = await decryptContent(content);
+                }
+                if (final === null) {
+                  // Decryption failed — leave local untouched
+                } else if (isEncBinary) {
                   const binaryStr = atob(final);
                   const bytes = new Uint8Array(binaryStr.length);
                   for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
-                  await vault.createBinary(normalized, bytes.buffer);
+                  await vault.modifyBinary(existingFile, bytes.buffer);
                 } else {
-                  await vault.create(normalized, final);
+                  await vault.modify(existingFile, final);
                 }
               }
+              syncedFiles.push(existingFile);
+              console.log(`[LM] pull update: ${remote.path}`);
+              this._syncPulledPaths.push(remote.path);
+              updated++;
+
+            } else {
+              // create — ensure parent dir first
+              const dir = remote.path.includes("/") ? remote.path.slice(0, remote.path.lastIndexOf("/")) : null;
+              if (dir) {
+                const dirPath = normalizePath(dir);
+                if (!vault.getAbstractFileByPath(dirPath)) {
+                  try { await vault.createFolder(dirPath); } catch { /* already exists */ }
+                }
+              }
+
+              if (isBinaryPath(remote.path) && !isEncBinary) {
+                const { buffer } = await api.getBinaryContent(remote.path);
+                await vault.createBinary(normalized, buffer);
+              } else {
+                const { content } = await api.getFileContent(remote.path);
+                let final: string | null = content;
+                if (this.settings.encryptionEnabled && derivedKey && isEncryptedContent(content)) {
+                  final = await decryptContent(content);
+                }
+                if (final !== null) {
+                  if (isEncBinary) {
+                    const binaryStr = atob(final);
+                    const bytes = new Uint8Array(binaryStr.length);
+                    for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+                    await vault.createBinary(normalized, bytes.buffer);
+                  } else {
+                    await vault.create(normalized, final);
+                  }
+                }
+              }
+              const newFile = vault.getAbstractFileByPath(normalized);
+              if (newFile instanceof TFile) syncedFiles.push(newFile);
+              console.log(`[LM] pull create: ${remote.path}`);
+              this._syncPulledPaths.push(remote.path);
+              created++;
             }
-            const newFile = vault.getAbstractFileByPath(normalized);
-            if (newFile instanceof TFile) syncedFiles.push(newFile);
-            console.log(`[LM] pull create: ${remote.path}`);
-            this._syncPulledPaths.push(remote.path);
-            created++;
+          } catch (e) {
+            console.warn(`[LM] pull error ${task.remote.path}:`, e);
           }
-        } catch (e) {
-          console.warn(`[LM] pull error ${remote.path}:`, e);
         }
-      }
+      };
+
+      await Promise.all(Array.from({ length: Math.min(PULL_CONCURRENCY, tasks.length || 1) }, () => worker()));
     } finally {
       this.pulling = false;
     }
@@ -2658,7 +2776,7 @@ class QuildenSyncSettingTab extends PluginSettingTab {
         // ── Group 2: Password ──
         const pwGroup = containerEl.createDiv("setting-group").createDiv("setting-items");
 
-        const hasSaved = this.plugin.hasSavedPassword;
+        const hasSaved = this.plugin.hasSavedKey;
         const showSavedState = !derivedKey && hasSaved && !this.changingPassword;
         const showInputState = (!derivedKey && (!hasSaved || this.changingPassword)) || (!!derivedKey && this.changingPassword);
 
@@ -2694,12 +2812,11 @@ class QuildenSyncSettingTab extends PluginSettingTab {
           pwSetting
             .addButton((btn) =>
               btn.setButtonText("Unlock").setCta().onClick(async () => {
-                const saved = this.plugin.loadSavedPassword() ?? "";
                 this.unlockFeedback = null;
-                await this.plugin.tryUnlockEncryption(saved);
-                this.unlockFeedback = derivedKey
-                  ? { ok: true, msg: "✓ Password correct — encryption unlocked." }
-                  : { ok: false, msg: "✗ Saved password is wrong. Try changing it." };
+                const ok = await this.plugin.loadAndApplyEncKey();
+                this.unlockFeedback = ok
+                  ? { ok: true, msg: "✓ Encryption unlocked." }
+                  : { ok: false, msg: "✗ Saved key is invalid. Try re-entering your password." };
                 this.display();
               })
             )
@@ -2712,7 +2829,7 @@ class QuildenSyncSettingTab extends PluginSettingTab {
             )
             .addButton((btn) =>
               btn.setButtonText("Forget").onClick(() => {
-                this.plugin.clearSavedPassword();
+                this.plugin.clearEncKey();
                 this.changingPassword = false;
                 this.unlockFeedback = null;
                 this.display();
@@ -2727,9 +2844,9 @@ class QuildenSyncSettingTab extends PluginSettingTab {
             this.unlockFeedback = null;
             await this.plugin.tryUnlockEncryption(password);
             if (derivedKey) {
-              this.plugin.savePassword(password);
+              await this.plugin.saveEncKey();
               this.changingPassword = false;
-              this.unlockFeedback = { ok: true, msg: "✓ Password saved on this device." };
+              this.unlockFeedback = { ok: true, msg: "✓ Password verified — key saved on this device." };
             } else {
               this.unlockFeedback = { ok: false, msg: "✗ Wrong password. Please try again." };
             }
