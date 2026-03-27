@@ -719,6 +719,27 @@ class GitHubAPI {
     }
   }
 
+  /**
+   * Initialize an empty repo via the Contents API (works before the Git Data API is available).
+   * Creates a placeholder commit so subsequent Git Data API calls succeed.
+   * Returns the SHA of the new HEAD commit.
+   */
+  async initializeRepo(): Promise<string> {
+    // PUT /repos/{owner}/{repo}/contents/{path} creates the file and the initial commit
+    const data = await this.request(
+      "PUT",
+      `/repos/${this.owner}/${this.repo}/contents/.gitkeep`,
+      {
+        message: "Initialize repository",
+        content: btoa(""), // empty file, base64-encoded
+        branch: this.branch,
+        new_branch: this.branch,
+      },
+    );
+    // Both GitHub and Gitea return { commit: { sha: "..." } }
+    return data.commit?.sha ?? data.sha;
+  }
+
   async getFileCommits(path: string): Promise<Array<{ sha: string; parentSha: string | null; message: string; author: string; date: string }>> {
     const encoded = path.split("/").map(encodeURIComponent).join("/");
     const data = await this.request(
@@ -2939,35 +2960,43 @@ export default class QuildenSyncPlugin extends Plugin {
 
     // Upload all blobs concurrently (8 workers), then create a single tree,
     // commit, and ref update — exactly like a standard `git commit`.
-    const isEmpty = await api.isBranchEmpty();
-    const currentSha = isEmpty ? null : await api.getRef();
-    const baseTreeSha = isEmpty ? "" : (await api.getCommit(currentSha!)).treeSha;
-    console.log(`[LM] base tree SHA: ${baseTreeSha || "(empty repo)"}`);
+    let isEmpty = await api.isBranchEmpty();
+
+    // Gitea's Git Data API (/git/blobs, /git/trees, etc.) requires at least one
+    // commit to exist before it accepts requests. Initialize via the Contents API.
+    if (isEmpty) {
+      console.log("[LM] empty repo detected — initializing via Contents API");
+      await api.initializeRepo();
+      isEmpty = false;
+    }
+
+    const currentSha = await api.getRef();
+    const baseTreeSha = (await api.getCommit(currentSha)).treeSha;
+    console.log(`[LM] base tree SHA: ${baseTreeSha}`);
 
     const deletionItems: Array<{ path: string; sha: null; mode: string }> =
       remoteDeletions.map(p => ({ path: p, sha: null, mode: "100644" }));
+
+    // Also remove the placeholder file created during initialization
+    const placeholderItem: { path: string; sha: null; mode: string } = { path: ".gitkeep", sha: null, mode: "100644" };
 
     console.log(`[LM] uploading ${changedFilesToPush.length} blob(s)`);
     const uploadedItems = changedFilesToPush.length > 0
       ? await uploadBatchBlobs(api, changedFilesToPush, 1)
       : [];
-    const treeItems = [...uploadedItems, ...deletionItems];
+    const treeItems = [...uploadedItems, ...deletionItems, placeholderItem];
 
-    const newTreeSha = isEmpty
-      ? await api.createTree("", treeItems)
-      : await api.createTree(baseTreeSha, treeItems);
+    const newTreeSha = await api.createTree(baseTreeSha, treeItems);
     console.log(`[LM] new tree SHA: ${newTreeSha}`);
 
-    if (!isEmpty && newTreeSha === baseTreeSha) {
+    if (newTreeSha === baseTreeSha) {
       console.log("[LM] push done — tree unchanged, no commit needed");
       changedFilesToPush.forEach((f) => this.dirtyPaths.delete(f.path));
       this.markFilesSynced(changedFilesToPush.map((f) => f.file));
     } else {
       const timestamp = new Date().toISOString().slice(0, 19).replace("T", " ");
-      const commitSha = isEmpty
-        ? await api.createInitialCommit(`${this.settings.commitMessage} - ${timestamp}`, newTreeSha)
-        : await api.createCommit(`${this.settings.commitMessage} - ${timestamp}`, newTreeSha, currentSha!);
-      isEmpty ? await api.createRef(commitSha) : await api.updateRef(commitSha);
+      const commitSha = await api.createCommit(`${this.settings.commitMessage} - ${timestamp}`, newTreeSha, currentSha);
+      await api.updateRef(commitSha);
       changedFilesToPush.forEach((f) => {
         this.dirtyPaths.delete(f.path);
         this._syncPushedPaths.push(f.path);
