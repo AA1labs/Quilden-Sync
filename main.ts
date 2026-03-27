@@ -467,7 +467,7 @@ class GitHubAPI {
     const MAX_RETRIES = 4;
     const RETRY_DELAYS_MS = [1000, 3000, 8000, 20000]; // exponential-ish backoff
 
-    let res: { status: number; json: any };
+    let res: { status: number; text: string; headers?: Record<string, string> };
     try {
       res = await requestUrl({
         url,
@@ -487,9 +487,17 @@ class GitHubAPI {
       throw networkErr;
     }
 
+    // Parse response body safely — some providers return non-JSON on errors
+    let parsed: any = null;
+    try {
+      if (res.text) parsed = JSON.parse(res.text);
+    } catch {
+      // Non-JSON response — leave parsed as null
+    }
+
     // Rate-limited — respect Retry-After header or back off
     if (res.status === 429 || res.status === 403) {
-      const retryAfter = (res as any).headers?.["retry-after"];
+      const retryAfter = res.headers?.["retry-after"];
       const waitMs = retryAfter ? Number(retryAfter) * 1000 : RETRY_DELAYS_MS[_attempt] ?? 20000;
       if (_attempt < MAX_RETRIES) {
         console.warn(`[LM] rate limited on ${method} ${path}, waiting ${waitMs}ms`);
@@ -507,11 +515,11 @@ class GitHubAPI {
     }
 
     if (res.status >= 400) {
-      const msg = res.json?.message ?? res.status;
-      console.error(`[LM] GitHub API ${method} ${path} → ${res.status}:`, msg);
+      const msg = parsed?.message ?? res.text?.slice(0, 200) ?? res.status;
+      console.error(`[LM] API ${method} ${path} → ${res.status}:`, msg);
       throw new Error(`GitHub API error ${res.status} on ${method} ${path}: ${msg}`);
     }
-    return res.json;
+    return parsed;
   }
 
   static async verifyToken(token: string, apiBase = "https://api.github.com"): Promise<{ login: string; avatar_url: string }> {
