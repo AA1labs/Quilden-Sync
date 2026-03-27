@@ -20,6 +20,7 @@ const QUILDEN_BASE = "https://quilden.com";
 
 interface QuildenSyncSettings {
   githubToken: string;
+  githubRefreshToken: string;
   githubUsername: string;
   repoOwner: string;
   repoName: string;
@@ -38,6 +39,7 @@ interface QuildenSyncSettings {
 interface SyncedFileState {
   mtime: number;
   size: number;
+  remoteSha?: string; // last known remote blob SHA — used to skip unchanged files on pull
 }
 
 interface SyncHistoryEntry {
@@ -56,6 +58,10 @@ interface PersistedPluginData {
   // Small AES-GCM ciphertext of "LM_ENCRYPTION_VERIFY" — used to validate
   // that the user's password matches the one originally used to encrypt the repo.
   encryptionVerifyToken?: string;
+  // Exported AES-GCM key bytes (base64). Stored in data.json which lives under
+  // .obsidian/ — already excluded from GitHub sync — so it never reaches the remote.
+  // Storing key bytes (not the password) means this file alone cannot reveal credentials.
+  encryptionKeyBytes?: string;
   syncHistory?: SyncHistoryEntry[];
 }
 
@@ -72,6 +78,7 @@ const MAX_SYNC_DIAGNOSTIC_SAMPLE = 20;
 
 const DEFAULT_SETTINGS: QuildenSyncSettings = {
   githubToken: "",
+  githubRefreshToken: "",
   githubUsername: "",
   repoOwner: "",
   repoName: "",
@@ -80,11 +87,11 @@ const DEFAULT_SETTINGS: QuildenSyncSettings = {
   syncOnSave: true,
   encryptionEnabled: false,
   encryptionScope: "markdown" as const,
-  syncOnStartup: false,
+  syncOnStartup: true,
   excludePatterns: [".obsidian/", ".trash/", ".DS_Store"],
   commitMessage: "Quilden Sync: Update from Obsidian",
   conflictStrategy: "newer",
-  notificationLocation: "notice",
+  notificationLocation: "statusbar",
 };
 
 const REQUIRED_EXCLUDE_PATTERNS = [".obsidian/", ".trash/", ".DS_Store"];
@@ -116,7 +123,7 @@ async function buildKey(password: string, salt: Uint8Array): Promise<CryptoKey> 
     { name: "PBKDF2", salt: salt as BufferSource, iterations: PBKDF2_ITERATIONS, hash: "SHA-256" },
     keyMaterial,
     { name: "AES-GCM", length: 256 },
-    false,
+    true,  // extractable — required to persist key bytes to data.json across restarts
     ["encrypt", "decrypt"]
   );
 }
@@ -574,6 +581,20 @@ class GitHubAPI {
     return { buffer: bytes.buffer, sha: data.sha };
   }
 
+  /** Returns only the blob SHA for a single file, or null if it doesn't exist on the remote. */
+  async getFileSha(path: string): Promise<string | null> {
+    try {
+      const data = await this.request(
+        "GET",
+        `/repos/${this.owner}/${this.repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(this.branch)}`
+      );
+      return data.sha ?? null;
+    } catch (e: any) {
+      if (e?.status === 404) return null;
+      throw e;
+    }
+  }
+
   async getRef(): Promise<string> {
     const data = await this.request(
       "GET",
@@ -733,6 +754,7 @@ class FileHistoryModal extends Modal {
   private leftEl?: HTMLElement;
   private mobileSelect?: HTMLSelectElement;
   private isMobileLayout = false;
+  private previewBlobUrl: string | null = null;
 
   constructor(app: App, file: TFile, api: GitHubAPI, encryptionEnabled: boolean) {
     super(app);
@@ -875,7 +897,45 @@ class FileHistoryModal extends Modal {
     try {
       if (isBinaryPath(this.file.path)) {
         this.diffEl.empty();
-        this.diffEl.createEl("p", { text: "Binary file — diff not available.", cls: "lm-history-status" });
+        // Revoke previous blob URL to avoid memory leaks
+        if (this.previewBlobUrl) { URL.revokeObjectURL(this.previewBlobUrl); this.previewBlobUrl = null; }
+
+        const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "svg"]);
+        const ext = this.file.extension.toLowerCase();
+
+        if (IMAGE_EXTS.has(ext)) {
+          this.diffEl.createEl("p", { text: "Loading preview…", cls: "lm-history-status" });
+          try {
+            const { buffer } = await this.api.getBinaryContentAtCommit(this.file.path, commit.sha);
+            this.diffEl.empty();
+
+            const header = this.diffEl.createDiv({ cls: "lm-diff-header" });
+            header.createEl("span", { text: commit.message, cls: "lm-diff-commit-msg" });
+            header.createEl("span", { text: ` · ${commit.author}, ${commit.date}`, cls: "lm-diff-commit-meta" });
+
+            const MIME: Record<string, string> = {
+              jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+              gif: "image/gif", webp: "image/webp", bmp: "image/bmp",
+              tiff: "image/tiff", tif: "image/tiff", svg: "image/svg+xml",
+            };
+            const blob = new Blob([buffer], { type: MIME[ext] ?? "application/octet-stream" });
+            this.previewBlobUrl = URL.createObjectURL(blob);
+
+            const wrap = this.diffEl.createDiv({ cls: "lm-history-img-wrap" });
+            const img = wrap.createEl("img", { cls: "lm-history-img" });
+            img.src = this.previewBlobUrl;
+            wrap.createEl("p", {
+              text: `${this.file.name} · ${(buffer.byteLength / 1024).toFixed(1)} KB`,
+              cls: "lm-history-img-meta",
+            });
+          } catch (e: any) {
+            this.diffEl.empty();
+            this.diffEl.createEl("p", { text: `Preview error: ${e.message}`, cls: "lm-history-error" });
+          }
+        } else {
+          this.diffEl.createEl("p", { text: "Binary file — preview not available.", cls: "lm-history-status" });
+        }
+
         this.selectedContent = "__binary__";
         this.restoreBtn.disabled = false;
         return;
@@ -981,6 +1041,7 @@ class FileHistoryModal extends Modal {
   }
 
   onClose() {
+    if (this.previewBlobUrl) { URL.revokeObjectURL(this.previewBlobUrl); this.previewBlobUrl = null; }
     this.contentEl.empty();
   }
 }
@@ -1223,6 +1284,7 @@ export default class QuildenSyncPlugin extends Plugin {
   private _syncPushedPaths: string[] = [];
   private _syncPulledPaths: string[] = [];
   private encryptionVerifyToken: string | null = null;
+  private encryptionKeyBytes: string | null = null; // exported AES key bytes, persisted in data.json
 
   get hasExistingEncryption(): boolean {
     return !!this.encryptionVerifyToken;
@@ -1232,38 +1294,36 @@ export default class QuildenSyncPlugin extends Plugin {
   // We store the DERIVED KEY BYTES (not the password) so the plaintext password
   // is never persisted anywhere. Key bytes are device-local and scoped to one
   // repo — unlike a password they cannot be reused on other services.
-  private encKeyStorageKey(): string {
-    return `quilden:enc-key:${this.settings.repoOwner}/${this.settings.repoName}`;
-  }
-
   get hasSavedKey(): boolean {
-    try { return !!window.localStorage.getItem(this.encKeyStorageKey()); }
-    catch { return false; }
+    return !!this.encryptionKeyBytes;
   }
 
-  /** Export current derivedKey bytes and save to localStorage. Never stores the password. */
+  /** Export current derivedKey bytes and persist to data.json. Never stores the password. */
   async saveEncKey(): Promise<void> {
     const exported = await exportDerivedKey();
-    if (!exported) return;
-    try {
-      window.localStorage.setItem(this.encKeyStorageKey(), exported);
-      // Migrate: remove any old plaintext password that may exist from a prior version.
-      window.localStorage.removeItem(`quilden:enc-pw:${this.settings.repoOwner}/${this.settings.repoName}`);
-    } catch { /* localStorage unavailable */ }
+    if (!exported) {
+      console.warn("[LM] saveEncKey: exportDerivedKey returned null — derivedKey may not be set");
+      return;
+    }
+    this.encryptionKeyBytes = exported;
+    await this.savePluginData();
+    console.log("[LM] saveEncKey: key bytes saved to data.json");
   }
 
-  /** Import saved key bytes and apply as active derivedKey. Returns true on success. */
+  /** Import persisted key bytes and apply as active derivedKey. Returns true on success. */
   async loadAndApplyEncKey(): Promise<boolean> {
-    try {
-      const base64 = window.localStorage.getItem(this.encKeyStorageKey());
-      if (!base64) return false;
-      return importDerivedKey(base64);
-    } catch { return false; }
+    if (!this.encryptionKeyBytes) {
+      console.log("[LM] loadAndApplyEncKey: no key bytes in data.json");
+      return false;
+    }
+    const ok = await importDerivedKey(this.encryptionKeyBytes);
+    console.log(`[LM] loadAndApplyEncKey: ${ok ? "success" : "failed — key bytes may be corrupt"}`);
+    return ok;
   }
 
   clearEncKey(): void {
-    try { window.localStorage.removeItem(this.encKeyStorageKey()); }
-    catch { /* localStorage unavailable */ }
+    this.encryptionKeyBytes = null;
+    this.savePluginData().catch(() => {});
   }
 
   // ── SyncState localStorage helpers ───────────────────────────────────────
@@ -1302,8 +1362,9 @@ export default class QuildenSyncPlugin extends Plugin {
     await this.loadSettings();
 
     // Auto-unlock encryption using saved key bytes (never the password).
+    // Awaited so derivedKey is set before any UI or sync runs.
     if (this.settings.encryptionEnabled && this.isConfigured()) {
-      this.loadAndApplyEncKey().catch(() => {});
+      await this.loadAndApplyEncKey().catch(() => {});
     }
 
     this.statusBarEl = this.addStatusBarItem();
@@ -1368,6 +1429,42 @@ export default class QuildenSyncPlugin extends Plugin {
 
     this.addSettingTab(new QuildenSyncSettingTab(this.app, this));
 
+    // Encrypted-file guard — intercept opening any file with QENC content
+    this.registerEvent(
+      this.app.workspace.on("file-open", async (file) => {
+        if (!file || isBinaryPath(file.path)) return;
+        if (this._pendingDecrypt.has(file.path)) return;
+        try {
+          const content = await this.app.vault.read(file);
+          if (!isEncryptedContent(content)) return;
+
+          if (derivedKey) {
+            // Key already loaded — silently decrypt in place
+            const dec = await decryptContent(content);
+            if (dec !== null) {
+              this.pulling = true;
+              try {
+                await this.app.vault.modify(file, dec);
+                if (this.syncState?.files) delete this.syncState.files[file.path];
+                await this.savePluginData();
+              } finally {
+                this.pulling = false;
+              }
+            }
+          } else {
+            // No key — prompt the user
+            this._pendingDecrypt.add(file.path);
+            new EncryptedFileModal(this.app, file, this, () => {
+              this._pendingDecrypt.delete(file.path);
+            }).open();
+            // Also register close cleanup in case user cancels
+            const cleanup = () => this._pendingDecrypt.delete(file.path);
+            setTimeout(cleanup, 60_000); // fallback: clear after 60s
+          }
+        } catch { /* ignore read errors */ }
+      })
+    );
+
     // Sync on save — debounced 5 s after last edit
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
@@ -1391,6 +1488,10 @@ export default class QuildenSyncPlugin extends Plugin {
     if (this.settings.syncOnStartup && this.isConfigured()) {
       setTimeout(() => this.runSync(), 3000);
     }
+
+    // Startup scan — find any QENC files in the vault before Obsidian indexes them.
+    // Runs after layout is ready so the vault file list is fully populated.
+    this.app.workspace.onLayoutReady(() => this.scanAndFixLocalQENC());
   }
 
   onunload() {
@@ -1540,10 +1641,12 @@ export default class QuildenSyncPlugin extends Plugin {
     }
   }
 
-  private markFilesSynced(files: TFile[]): void {
+  private markFilesSynced(files: TFile[], remoteShas?: Map<string, string>): void {
     const nextFiles = { ...this.syncState.files };
     for (const file of files) {
-      nextFiles[file.path] = this.getFileSyncState(file);
+      const state = this.getFileSyncState(file);
+      const sha = remoteShas?.get(file.path);
+      nextFiles[file.path] = sha ? { ...state, remoteSha: sha } : state;
     }
     this.syncState = {
       ...this.syncState,
@@ -1551,15 +1654,20 @@ export default class QuildenSyncPlugin extends Plugin {
     };
   }
 
-  private pruneSyncState(activeFiles: TFile[]): void {
+  /** Prune syncState to only active vault files. Returns paths that were removed (locally deleted). */
+  private pruneSyncState(activeFiles: TFile[]): string[] {
     const activePaths = new Set(activeFiles.map((file) => file.path));
-    const nextFiles = Object.fromEntries(
-      Object.entries(this.syncState.files).filter(([path]) => activePaths.has(path))
-    );
-    this.syncState = {
-      ...this.syncState,
-      files: nextFiles,
-    };
+    const deleted: string[] = [];
+    const nextFiles: typeof this.syncState.files = {};
+    for (const [path, state] of Object.entries(this.syncState.files)) {
+      if (activePaths.has(path)) {
+        nextFiles[path] = state;
+      } else {
+        deleted.push(path);
+      }
+    }
+    this.syncState = { ...this.syncState, files: nextFiles };
+    return deleted;
   }
 
   private normalizeExcludePatterns(patterns: unknown): string[] {
@@ -1588,11 +1696,15 @@ export default class QuildenSyncPlugin extends Plugin {
         files: rawSyncState.files,
       };
       this.encryptionVerifyToken = stored.encryptionVerifyToken ?? null;
+      this.encryptionKeyBytes = stored.encryptionKeyBytes ?? null;
       this.syncHistory = stored.syncHistory ?? [];
+      console.log(`[LM] loadSettings: encryptionKeyBytes=${this.encryptionKeyBytes ? "present" : "absent"}, verifyToken=${this.encryptionVerifyToken ? "present" : "absent"}`);
     } else {
       this.settings = Object.assign({}, DEFAULT_SETTINGS, stored ?? {});
       this.syncState = { repoKey: "", files: {} };
       this.encryptionVerifyToken = null;
+      this.encryptionKeyBytes = null;
+      console.log(`[LM] loadSettings: legacy data format — encryptionKeyBytes not present`);
     }
 
     this.settings = {
@@ -1617,7 +1729,7 @@ export default class QuildenSyncPlugin extends Plugin {
     console.log(`[LM] loadSettings: final syncState key="${this.syncState.repoKey}" files=${Object.keys(this.syncState.files).length}`);
   }
 
-  private async savePluginData() {
+  async savePluginData() {
     // Persist syncState to device-local localStorage first (primary store).
     // This prevents iCloud (or any other vault-sync) from overwriting sync
     // progress saved on this device when it pushes an older data.json.
@@ -1628,6 +1740,7 @@ export default class QuildenSyncPlugin extends Plugin {
       syncState: this.syncState, // keep in data.json for migration / other devices
     };
     if (this.encryptionVerifyToken) data.encryptionVerifyToken = this.encryptionVerifyToken;
+    if (this.encryptionKeyBytes) data.encryptionKeyBytes = this.encryptionKeyBytes;
     if (this.syncHistory.length > 0) data.syncHistory = this.syncHistory;
     await this.saveData(data);
   }
@@ -1693,15 +1806,16 @@ export default class QuildenSyncPlugin extends Plugin {
 
   notify(message: string, duration?: number): void {
     const loc = this.settings.notificationLocation ?? "notice";
-    if (loc === "notice") {
-      new Notice(message, duration);
-    } else if (loc === "statusbar" && this.statusMsgEl) {
+    if (loc === "none") return;
+    // Status bar is not visible on mobile — fall back to Notice
+    if (loc === "statusbar" && !Platform.isMobile && this.statusMsgEl) {
       this.statusMsgEl.textContent = " " + message.slice(0, 60);
       window.setTimeout(() => {
         if (this.statusMsgEl) this.statusMsgEl.textContent = "";
       }, duration ?? 4000);
+    } else {
+      new Notice(message, duration);
     }
-    // "none" = silent
   }
 
   private showSyncHistoryPopup() {
@@ -1890,7 +2004,274 @@ export default class QuildenSyncPlugin extends Plugin {
       await api.updateRef(commitSha);
     }
 
-    new Notice(`✓ Decrypted ${toDecrypt.length} file(s) successfully.`);
+    new Notice(`✓ Decrypted ${toDecrypt.length} file(s) on GitHub. Updating local vault…`);
+
+    // Write decrypted content directly to local vault files
+    const vault = this.app.vault;
+    let localFixed = 0;
+    for (const f of toDecrypt) {
+      try {
+        const normalized = normalizePath(f.path);
+        const vaultFile = vault.getAbstractFileByPath(normalized);
+        if (!(vaultFile instanceof TFile)) continue;
+        if (f.binary) {
+          const binaryStr = atob(f.content);
+          const bytes = new Uint8Array(binaryStr.length);
+          for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+          await vault.modifyBinary(vaultFile, bytes.buffer);
+        } else {
+          await vault.modify(vaultFile, f.content);
+        }
+        // Update syncState so next push doesn't re-encrypt
+        if (this.syncState?.files) delete this.syncState.files[f.path];
+        localFixed++;
+      } catch (e) {
+        console.warn(`[LM] decrypt local failed for ${f.path}:`, e);
+      }
+    }
+    if (this.syncState?.files && localFixed > 0) await this.savePluginData();
+    new Notice(`✓ Local vault updated: ${localFixed} file(s) decrypted.`);
+  }
+
+  /**
+   * Scan ALL local vault files and decrypt any that contain QENC-encrypted content.
+   * This is a purely local operation — no GitHub API calls.
+   */
+  /**
+   * Called once on startup (after layout ready). Scans all text files for QENC
+   * content so nothing encrypted sits in the vault where Obsidian would index it.
+   *
+   * - If the key is available: silently decrypt everything found.
+   * - If no key: show a persistent notice so the user knows to unlock.
+   */
+  private async scanAndFixLocalQENC(): Promise<void> {
+    const vault = this.app.vault;
+    const textFiles = vault.getFiles().filter(f => !isBinaryPath(f.path));
+    const encrypted: TFile[] = [];
+
+    for (const file of textFiles) {
+      try {
+        const content = await vault.read(file);
+        if (isEncryptedContent(content)) encrypted.push(file);
+      } catch { /* skip unreadable files */ }
+    }
+
+    if (encrypted.length === 0) return;
+
+    if (derivedKey) {
+      // Key available — silently fix them all
+      this.pulling = true;
+      try {
+        let fixed = 0;
+        for (const file of encrypted) {
+          try {
+            const content = await vault.read(file);
+            const dec = await decryptContent(content);
+            if (dec !== null) {
+              await vault.modify(file, dec);
+              if (this.syncState?.files) delete this.syncState.files[file.path];
+              fixed++;
+            }
+          } catch { /* skip */ }
+        }
+        if (fixed > 0) await this.savePluginData();
+      } finally {
+        this.pulling = false;
+      }
+    } else {
+      // No key — warn the user so they know search/links are broken until decrypted
+      const n = encrypted.length;
+      new Notice(
+        `Quilden Sync: ${n} encrypted file${n > 1 ? "s" : ""} found in vault — open Settings → Quilden Sync and enter your encryption password to restore them.`,
+        0 // persist until dismissed
+      );
+    }
+  }
+
+  async decryptLocalVaultFiles(): Promise<void> {
+    if (!derivedKey) {
+      new Notice("Unlock encryption first by entering your password.");
+      return;
+    }
+    const vault = this.app.vault;
+
+    // Pre-filter: only files known to syncState (synced through Quilden) and not binary-clean.
+    // QENC content is always UTF-8 text, so only text files need checking.
+    // This skips the vast majority of vault files that were never synced or are plain.
+    const syncedPaths = new Set(Object.keys(this.syncState.files));
+    const candidates = vault.getFiles().filter(f => syncedPaths.has(f.path) && !isBinaryPath(f.path));
+
+    if (candidates.length === 0) {
+      new Notice("No synced text files to scan.");
+      return;
+    }
+
+    let fixed = 0, failed = 0, nextIdx = 0;
+    const CONCURRENCY = 32;
+
+    const worker = async () => {
+      while (nextIdx < candidates.length) {
+        const file = candidates[nextIdx++];
+        try {
+          const content = await vault.read(file);
+          if (!isEncryptedContent(content)) continue;
+          const dec = await decryptContent(content);
+          if (dec === null) continue;
+          await vault.modify(file, dec);
+          if (this.syncState?.files) delete this.syncState.files[file.path];
+          fixed++;
+        } catch (e) {
+          console.warn(`[LM] local decrypt failed for ${file.path}:`, e);
+          failed++;
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, candidates.length) }, worker));
+    if (fixed > 0) await this.savePluginData();
+    new Notice(`✓ Local vault: decrypted ${fixed} file(s)${failed > 0 ? `, ${failed} skipped` : ""}.`);
+  }
+
+  /**
+   * Scan ALL media/image files and restore any that were accidentally stored as
+   * QENC-encrypted blobs (regardless of the current encryption scope setting).
+   * This is a targeted repair — it only touches files that actually have QENC content.
+   */
+  async repairEncryptedMediaFiles(): Promise<void> {
+    if (!this.isConfigured()) {
+      new Notice("Configure GitHub connection first.");
+      return;
+    }
+    if (!derivedKey) {
+      new Notice("Unlock encryption first by entering your password.");
+      return;
+    }
+
+    const api = new GitHubAPI(
+      this.settings.githubToken,
+      this.settings.repoOwner,
+      this.settings.repoName,
+      this.settings.branch,
+    );
+
+    // Fast path: use syncState as candidate list instead of fetching the full remote tree.
+    // Only media files already tracked in syncState could have been stored as QENC blobs.
+    const MEDIA_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "svg", "pdf"]);
+    const candidates = Object.keys(this.syncState.files).filter(path => {
+      const ext = path.split(".").pop()?.toLowerCase() ?? "";
+      return MEDIA_EXTS.has(ext);
+    });
+
+    if (candidates.length === 0) {
+      new Notice("No synced media files found to check.");
+      return;
+    }
+
+    new Notice(`Checking ${candidates.length} media file(s)…`);
+
+    const CONCURRENCY = 32;
+    const toRepair: Array<{ path: string; content: string }> = [];
+    let nextIdx = 0;
+
+    const checkWorker = async () => {
+      while (nextIdx < candidates.length) {
+        const path = candidates[nextIdx++];
+        try {
+          const { content } = await api.getFileContent(path);
+          if (!isEncryptedContent(content)) continue;
+          const dec = await decryptContent(content);
+          if (dec !== null) toRepair.push({ path, content: dec });
+        } catch { /* not accessible or already fixed — skip */ }
+      }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, candidates.length) }, checkWorker));
+
+    if (toRepair.length === 0) {
+      new Notice("No encrypted image files found — nothing to repair.");
+      return;
+    }
+
+    new Notice(`Repairing ${toRepair.length} encrypted image file(s)…`);
+
+    const BATCH_SIZE = 50;
+    let fixed = 0;
+    for (let i = 0; i < toRepair.length; i += BATCH_SIZE) {
+      const batch = toRepair.slice(i, i + BATCH_SIZE);
+      const latestSha = await api.getRef();
+      const { treeSha } = await api.getCommit(latestSha);
+      const treeItems = await Promise.all(
+        batch.map(async (f) => {
+          // Determine if decrypted content is valid base64 (plugin-encrypted binary)
+          // or a raw string (web app-encrypted binary via TextDecoder).
+          let encoding: "base64" | "utf-8" = "utf-8";
+          try {
+            atob(f.content);
+            encoding = "base64";
+          } catch {
+            // Not valid base64 — upload as UTF-8 best-effort
+          }
+          return {
+            path: f.path,
+            sha: await api.createBlob(f.content, encoding),
+            mode: "100644",
+          };
+        })
+      );
+      const newTreeSha = await api.createTree(treeSha, treeItems);
+      const commitSha = await api.createCommit(
+        "Quilden: Fix encrypted image files",
+        newTreeSha,
+        latestSha,
+      );
+      await api.updateRef(commitSha);
+      fixed += batch.length;
+    }
+
+    new Notice(`✓ Repaired ${fixed} encrypted image file(s) on GitHub. Updating local vault…`);
+
+    // Write decrypted content directly to local vault files (faster than a full pull)
+    const vault = this.app.vault;
+    let localFixed = 0;
+    for (const f of toRepair) {
+      try {
+        const normalized = normalizePath(f.path);
+        const vaultFile = vault.getAbstractFileByPath(normalized);
+        if (!(vaultFile instanceof TFile)) continue;
+        // Determine encoding: valid base64 → binary file; otherwise → text
+        try {
+          const binaryStr = atob(f.content);
+          const bytes = new Uint8Array(binaryStr.length);
+          for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+          await vault.modifyBinary(vaultFile, bytes.buffer);
+        } catch {
+          // Not valid base64 (web-app encrypted path) — write as text best-effort
+          await vault.modify(vaultFile, f.content);
+        }
+        if (this.syncState?.files) delete this.syncState.files[f.path];
+        localFixed++;
+      } catch (e) {
+        console.warn(`[LM] repair local failed for ${f.path}:`, e);
+      }
+    }
+    if (this.syncState?.files && localFixed > 0) await this.savePluginData();
+    new Notice(`✓ Local vault updated: ${localFixed} image(s) restored.`);
+  }
+
+  /** Delete syncState entries for encrypted-scope files so Phase 1 is forced to re-pull and decrypt them after key unlock. */
+  private clearEncryptedSyncState(): void {
+    const nextFiles: typeof this.syncState.files = {};
+    let changed = false;
+    for (const [path, state] of Object.entries(this.syncState.files)) {
+      if (this.settings.encryptionEnabled && shouldEncryptPath(path, this.settings.encryptionScope)) {
+        // Drop the entry entirely — Phase 1 will see !cached → re-evaluate on next pull
+        changed = true;
+      } else {
+        nextFiles[path] = state;
+      }
+    }
+    if (changed) this.syncState = { ...this.syncState, files: nextFiles };
+    this._encryptedNoKeyNoticeShown = false;
   }
 
   async tryUnlockEncryption(password: string): Promise<void> {
@@ -1944,6 +2325,9 @@ export default class QuildenSyncPlugin extends Plugin {
       this.encryptionVerifyToken = repoToken;
       await this.savePluginData();
       new Notice("Quilden Sync: Password verified ✓");
+      this.clearEncryptedSyncState();
+      this.scanAndFixLocalQENC();
+      this.runSync("pull").catch(e => console.warn("[LM] post-unlock pull failed:", e));
       return;
     } catch { /* verify file missing — fall through to md sampling */ }
 
@@ -1973,8 +2357,14 @@ export default class QuildenSyncPlugin extends Plugin {
         } catch { continue; }
       }
     } catch (e: any) {
-      new Notice(`Could not reach repo for verification: ${e.message}`, 5000);
-      return;
+      // 404 means the repo is empty or the branch doesn't exist yet — treat as
+      // first-time setup (no encrypted files to verify against).
+      const is404 = e.message?.includes("404") || e.message?.includes("Not Found");
+      if (!is404) {
+        new Notice(`Could not reach repo for verification: ${e.message}`, 5000);
+        return;
+      }
+      // Fall through: empty repo → accept password as new setup
     }
 
     if (foundEncrypted && !passwordCorrect) return; // already notified above
@@ -2000,6 +2390,9 @@ export default class QuildenSyncPlugin extends Plugin {
         12000
       );
     }
+    this.clearEncryptedSyncState();
+    this.scanAndFixLocalQENC();
+    this.runSync("pull").catch(e => console.warn("[LM] post-unlock pull failed:", e));
   }
 
   private openFileHistory(file: TFile) {
@@ -2066,17 +2459,18 @@ export default class QuildenSyncPlugin extends Plugin {
 
   /** Try to silently refresh the token via the server. Returns true if successful. */
   private async tryRefreshToken(): Promise<boolean> {
-    if (!this.settings.githubUsername) return false;
+    if (!this.settings.githubRefreshToken) return false;
     try {
       const res = await requestUrl({
         url: `${QUILDEN_BASE}/api/auth/plugin-refresh`,
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ login: this.settings.githubUsername, token: this.settings.githubToken }),
+        body: JSON.stringify({ refreshToken: this.settings.githubRefreshToken }),
         throw: false,
       });
       if (res.status === 200 && res.json?.token) {
         this.settings.githubToken = res.json.token;
+        if (res.json.refreshToken) this.settings.githubRefreshToken = res.json.refreshToken;
         await this.saveSettings();
         console.log("[LM] token refreshed silently");
         return true;
@@ -2099,16 +2493,10 @@ export default class QuildenSyncPlugin extends Plugin {
       if (!refreshed) {
         throw new Error("GitHub token is invalid or expired. Disconnect and reconnect.");
       }
-      // Re-verify with new token
-      const retry = await requestUrl({
-        url: "https://api.github.com/user",
-        method: "GET",
-        headers: ghHeaders(this.settings.githubToken),
-        throw: false,
-      });
-      if (retry.status === 401) {
-        throw new Error("GitHub token is invalid or expired. Disconnect and reconnect.");
-      }
+      // Token just came from our auth server — trust it without re-verifying immediately.
+      // GitHub has a brief propagation delay after issuing a new token; re-checking right
+      // away would get a false 401 and show a spurious "token expired" notification.
+      return;
     }
 
     if (tokenCheck.status >= 400) {
@@ -2196,8 +2584,9 @@ export default class QuildenSyncPlugin extends Plugin {
         this.settings.branch
       );
 
-      if (mode === "push" || mode === "full") await this.pushChanges(api, "incremental");
-      if (mode === "pull" || mode === "full") await this.pullChanges(api);
+      let justDeleted: ReadonlySet<string> = new Set();
+      if (mode === "push" || mode === "full") justDeleted = await this.pushChanges(api, "incremental");
+      if (mode === "pull" || mode === "full") await this.pullChanges(api, justDeleted);
 
       // Record sync history entry
       this.lastSyncTime = new Date();
@@ -2221,8 +2610,13 @@ export default class QuildenSyncPlugin extends Plugin {
       console.error("[LM] Sync error:", e);
       this.updateStatusBar("error");
       const msg = e instanceof Error ? e.message : "Unknown error";
-      const isNetworkError = msg.includes("ERR_NETWORK") || msg.includes("ERR_INTERNET") || msg.includes("net::") || msg.includes("fetch");
-      if (isNetworkError) {
+      const isAuthError = msg.includes("401") || msg.includes("token is invalid") || msg.includes("Bad credentials") || msg.includes("Unauthorized");
+      const isNetworkError = !isAuthError && (msg.includes("ERR_NETWORK") || msg.includes("ERR_INTERNET") || msg.includes("net::") || msg.includes("fetch"));
+      if (isAuthError) {
+        // Cancel any pending retry — retrying won't help with an expired token
+        if (this.networkRetryTimer !== null) { window.clearTimeout(this.networkRetryTimer); this.networkRetryTimer = null; }
+        this.notify(`Quilden Sync: Token expired — disconnect and reconnect in settings`, 10000);
+      } else if (isNetworkError) {
         const RETRY_DELAY_S = 30;
         this.notify(`Quilden Sync: Network lost — retrying in ${RETRY_DELAY_S}s`, 8000);
         if (this.networkRetryTimer !== null) window.clearTimeout(this.networkRetryTimer);
@@ -2243,8 +2637,11 @@ export default class QuildenSyncPlugin extends Plugin {
 
   // Tracks files modified locally since last push (for incremental syncs)
   private dirtyPaths = new Set<string>();
+  // Paths currently showing the EncryptedFileModal — prevents duplicate modals
+  private _pendingDecrypt = new Set<string>();
+  private _encryptedNoKeyNoticeShown = false;
 
-  private async pushChanges(api: GitHubAPI, scope: "full" | "incremental" = "full") {
+  private async pushChanges(api: GitHubAPI, scope: "full" | "incremental" = "full"): Promise<Set<string>> {
     const allVaultFiles = this.app.vault.getFiles();
     const preEnsureCount = Object.keys(this.syncState.files).length;
     const preEnsureKey = this.syncState.repoKey;
@@ -2255,7 +2652,7 @@ export default class QuildenSyncPlugin extends Plugin {
       console.warn(`[LM] BUG: pushChanges ensureSyncStateRepoKey() wiped ${preEnsureCount} entries!`);
     }
     const prePruneCount = Object.keys(this.syncState.files).length;
-    this.pruneSyncState(allVaultFiles);
+    const deletedPaths = this.pruneSyncState(allVaultFiles);
     const postPruneCount = Object.keys(this.syncState.files).length;
     console.log(`[LM] pushChanges: after pruneSyncState: ${postPruneCount} entries (pruned ${prePruneCount - postPruneCount} stale paths from ${allVaultFiles.length} vault files)`);
 
@@ -2277,9 +2674,10 @@ export default class QuildenSyncPlugin extends Plugin {
       console.log(`[LM] full sync scan: ${candidateFiles.length} local file(s)`);
     }
 
-    if (candidateFiles.length === 0) {
+    // Even if no files changed, we may still need to commit deletions
+    if (candidateFiles.length === 0 && deletedPaths.length === 0) {
       console.log("[LM] pushChanges: nothing to push");
-      return;
+      return new Set<string>();
     }
 
     const filesToPush: Array<{ file: TFile; path: string; content: string; encoding: "utf-8" | "base64" }> = [];
@@ -2310,12 +2708,40 @@ export default class QuildenSyncPlugin extends Plugin {
 
     console.log(`[LM] pushChanges: prepared ${filesToPush.length} local file(s) for comparison`);
 
-    const { blobs: remoteTree, truncated: remoteTreeTruncated } = await api.getTree();
-    if (remoteTreeTruncated) {
-      console.warn(`[LM] remote tree is truncated (repo too large for single tree fetch). Missing-sync-state files absent from the partial tree will be skipped to avoid re-uploading unchanged content.`);
+    // Optimisation: for small incremental pushes with no deletions, fetch only
+    // the SHAs of the specific files instead of the full tree.
+    // Fall back to getTree() when there are many candidates (e.g. first sync).
+    const PER_FILE_LOOKUP_THRESHOLD = 10;
+    const usePerFileLookup = scope === "incremental"
+      && deletedPaths.length === 0
+      && filesToPush.length <= PER_FILE_LOOKUP_THRESHOLD;
+    let remoteShaByPath: Map<string, string>;
+    let remoteTreeTruncated = false;
+
+    if (usePerFileLookup) {
+      // Fetch SHAs for non-encrypted candidates in parallel (encrypted files use mtime comparison).
+      const needsSha = filesToPush.filter(f =>
+        !(this.settings.encryptionEnabled && !!derivedKey && shouldEncryptPath(f.path, this.settings.encryptionScope))
+      );
+      const shaEntries = await Promise.all(
+        needsSha.map(async f => {
+          const sha = await api.getFileSha(f.path);
+          return [f.path, sha] as [string, string | null];
+        })
+      );
+      remoteShaByPath = new Map(
+        shaEntries.filter((e): e is [string, string] => e[1] !== null)
+      );
+      console.log(`[LM] remote SHAs fetched for ${shaEntries.length} file(s) (per-file lookup)`);
+    } else {
+      const { blobs: remoteTree, truncated } = await api.getTree();
+      remoteTreeTruncated = truncated;
+      if (remoteTreeTruncated) {
+        console.warn(`[LM] remote tree is truncated (repo too large for single tree fetch). Missing-sync-state files absent from the partial tree will be skipped to avoid re-uploading unchanged content.`);
+      }
+      console.log(`[LM] remote tree: ${remoteTree.length} entries${remoteTreeTruncated ? " (TRUNCATED)" : ""}`);
+      remoteShaByPath = new Map(remoteTree.map((entry) => [entry.path, entry.sha]));
     }
-    console.log(`[LM] remote tree: ${remoteTree.length} entries${remoteTreeTruncated ? " (TRUNCATED)" : ""}`);
-    const remoteShaByPath = new Map(remoteTree.map((entry) => [entry.path, entry.sha]));
     const changedFilesToPush: Array<{ file: TFile; path: string; content: string; encoding: "utf-8" | "base64" }> = [];
     const unchangedFiles: TFile[] = [];
     const remoteComparisonDiagnostics: Array<{
@@ -2388,11 +2814,18 @@ export default class QuildenSyncPlugin extends Plugin {
 
     this.logRemoteComparisonDiagnostics(remoteComparisonDiagnostics);
 
+    // Filter deletions to only paths that actually exist on the remote
+    // (no point deleting something GitHub doesn't have)
+    const remoteDeletions = deletedPaths.filter(p => remoteShaByPath.has(p));
+    if (remoteDeletions.length > 0) {
+      console.log(`[LM] pushChanges: ${remoteDeletions.length} file(s) to delete on remote: ${remoteDeletions.join(", ")}`);
+    }
+
     console.log(`[LM] pushChanges: ${changedFilesToPush.length}/${filesToPush.length} file(s) changed vs remote`);
 
-    if (changedFilesToPush.length === 0) {
+    if (changedFilesToPush.length === 0 && remoteDeletions.length === 0) {
       console.log("[LM] pushChanges: nothing changed vs remote");
-      return;
+      return new Set<string>();
     }
 
     // Upload all blobs concurrently (8 workers), then create a single tree,
@@ -2401,8 +2834,14 @@ export default class QuildenSyncPlugin extends Plugin {
     const { treeSha } = await api.getCommit(currentSha);
     console.log(`[LM] base tree SHA: ${treeSha}`);
 
+    const deletionItems: Array<{ path: string; sha: null; mode: string }> =
+      remoteDeletions.map(p => ({ path: p, sha: null, mode: "100644" }));
+
     console.log(`[LM] uploading ${changedFilesToPush.length} blob(s)`);
-    const treeItems = await uploadBatchBlobs(api, changedFilesToPush, 1);
+    const uploadedItems = changedFilesToPush.length > 0
+      ? await uploadBatchBlobs(api, changedFilesToPush, 1)
+      : [];
+    const treeItems = [...uploadedItems, ...deletionItems];
 
     const newTreeSha = await api.createTree(treeSha, treeItems);
     console.log(`[LM] new tree SHA: ${newTreeSha}`);
@@ -2424,14 +2863,17 @@ export default class QuildenSyncPlugin extends Plugin {
         this._syncPushedPaths.push(f.path);
       });
       this.markFilesSynced(changedFilesToPush.map((f) => f.file));
-      console.log(`[LM] push done — 1 commit ${commitSha} (${changedFilesToPush.length} file(s))`);
+      if (remoteDeletions.length > 0) remoteDeletions.forEach(p => this._syncPushedPaths.push(p));
+      console.log(`[LM] push done — 1 commit ${commitSha} (${changedFilesToPush.length} file(s) updated, ${remoteDeletions.length} deleted)`);
+      return new Set(remoteDeletions);
     }
     await this.savePluginData();
+    return new Set<string>();
   }
 
   private pulling = false;
 
-  private async pullChanges(api: GitHubAPI) {
+  private async pullChanges(api: GitHubAPI, skipPaths: ReadonlySet<string> = new Set()) {
     const vault = this.app.vault;
 
     // One API call to get all remote SHAs — no content fetched yet
@@ -2451,6 +2893,7 @@ export default class QuildenSyncPlugin extends Plugin {
     const tasks: PullTask[] = [];
 
     for (const remote of remoteTree) {
+      if (skipPaths.has(remote.path)) continue; // just deleted in this sync — don't re-create
       if (this.shouldExclude(remote.path)) continue;
       if (/^\.\.\/|\/\.\.\//g.test(remote.path) || remote.path.startsWith("/")) continue;
       const firstSegment = remote.path.split("/")[0];
@@ -2460,22 +2903,21 @@ export default class QuildenSyncPlugin extends Plugin {
       const existing = vault.getAbstractFileByPath(normalized);
 
       if (existing instanceof TFile) {
+        const cached = this.syncState.files[remote.path];
         let needsUpdate: boolean;
-        if (this.settings.encryptionEnabled && shouldEncryptPath(remote.path, this.settings.encryptionScope)) {
-          needsUpdate = this.syncState.files[remote.path]?.mtime !== existing.stat.mtime
-            || !(this.syncState.files[remote.path]);
+        // Fast path: if the remote SHA hasn't changed since last sync, nothing to do —
+        // regardless of encryption state. This also prevents re-downloading encrypted
+        // files when there's no key (they're recorded with remoteSha after first encounter).
+        if (cached?.remoteSha === remote.sha) {
+          needsUpdate = false;
+        } else if (this.settings.encryptionEnabled && shouldEncryptPath(remote.path, this.settings.encryptionScope)) {
+          needsUpdate = !cached || cached.mtime !== existing.stat.mtime;
         } else {
-          // Use cached remote SHA from syncState to skip local read when unchanged
-          const cached = this.syncState.files[remote.path];
-          if (cached && (cached as any).remoteSha === remote.sha) {
-            needsUpdate = false;
-          } else {
-            const localBytes = isBinaryPath(remote.path)
-              ? new Uint8Array(await vault.readBinary(existing))
-              : new TextEncoder().encode(await vault.read(existing));
-            const localSha = await gitBlobSha(localBytes);
-            needsUpdate = localSha !== remote.sha;
-          }
+          const localBytes = isBinaryPath(remote.path)
+            ? new Uint8Array(await vault.readBinary(existing))
+            : new TextEncoder().encode(await vault.read(existing));
+          const localSha = await gitBlobSha(localBytes);
+          needsUpdate = localSha !== remote.sha;
         }
         if (!needsUpdate) {
           unchanged++;
@@ -2484,12 +2926,22 @@ export default class QuildenSyncPlugin extends Plugin {
         }
         tasks.push({ remote, normalized, action: "update", existingFile: existing });
       } else {
+        // File doesn't exist locally. Check if we've seen this remote SHA before and
+        // couldn't process it (e.g. encrypted with no key) — don't re-attempt unless remote changed.
+        const cached = this.syncState.files[remote.path];
+        if (cached?.remoteSha === remote.sha) {
+          unchanged++;
+          continue;
+        }
         tasks.push({ remote, normalized, action: "create" });
       }
     }
 
     // ── Phase 2: download and apply in parallel ────────────────────────────────
     const PULL_CONCURRENCY = 8;
+    // Tracks path → remote SHA for every processed task so syncState.remoteSha stays current.
+    const remoteShaForPath = new Map<string, string>();
+    let encryptedNoKeyCount = 0;
     this.pulling = true;
     try {
       let nextIdx = 0;
@@ -2504,6 +2956,7 @@ export default class QuildenSyncPlugin extends Plugin {
 
             if (action === "update" && existingFile) {
               if (isBinaryPath(remote.path) && !isEncBinary) {
+                // Plain binary (not encrypted) — fast path via raw download
                 const { buffer } = await api.getBinaryContent(remote.path);
                 if (buffer.byteLength === 0 && existingFile.stat.size > 0) {
                   console.log(`[LM] pull skip ${remote.path}: remote empty, local has content`);
@@ -2515,20 +2968,34 @@ export default class QuildenSyncPlugin extends Plugin {
               } else {
                 const { content } = await api.getFileContent(remote.path);
                 let final: string | null = content;
-                if (this.settings.encryptionEnabled && derivedKey && isEncryptedContent(content)) {
-                  final = await decryptContent(content);
+                // Decrypt QENC if key is available; otherwise write QENC as-is so user can access it.
+                if (isEncryptedContent(content)) {
+                  if (!derivedKey) {
+                    // No key — write QENC content as-is so user can open and decrypt it locally.
+                    // EncryptedFileModal handles per-file decryption on open.
+                    encryptedNoKeyCount++;
+                    // final stays as content (QENC), falls through to vault.modify below
+                  } else {
+                    final = await decryptContent(content);
+                  }
                 }
                 if (final === null) {
                   // Decryption failed — leave local untouched
-                } else if (isEncBinary) {
-                  const binaryStr = atob(final);
-                  const bytes = new Uint8Array(binaryStr.length);
-                  for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
-                  await vault.modifyBinary(existingFile, bytes.buffer);
+                } else if (isBinaryPath(remote.path)) {
+                  // Binary file: decrypted content is base64-encoded bytes
+                  try {
+                    const binaryStr = atob(final);
+                    const bytes = new Uint8Array(binaryStr.length);
+                    for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+                    await vault.modifyBinary(existingFile, bytes.buffer);
+                  } catch {
+                    await vault.modify(existingFile, final);
+                  }
                 } else {
                   await vault.modify(existingFile, final);
                 }
               }
+              remoteShaForPath.set(remote.path, remote.sha);
               syncedFiles.push(existingFile);
               console.log(`[LM] pull update: ${remote.path}`);
               this._syncPulledPaths.push(remote.path);
@@ -2545,25 +3012,37 @@ export default class QuildenSyncPlugin extends Plugin {
               }
 
               if (isBinaryPath(remote.path) && !isEncBinary) {
+                // Plain binary — fast path
                 const { buffer } = await api.getBinaryContent(remote.path);
                 await vault.createBinary(normalized, buffer);
               } else {
                 const { content } = await api.getFileContent(remote.path);
                 let final: string | null = content;
-                if (this.settings.encryptionEnabled && derivedKey && isEncryptedContent(content)) {
-                  final = await decryptContent(content);
+                if (isEncryptedContent(content)) {
+                  if (!derivedKey) {
+                    // No key — create file with QENC content so user can decrypt it locally.
+                    encryptedNoKeyCount++;
+                    // final stays as content (QENC), falls through to vault.create below
+                  } else {
+                    final = await decryptContent(content);
+                  }
                 }
                 if (final !== null) {
-                  if (isEncBinary) {
-                    const binaryStr = atob(final);
-                    const bytes = new Uint8Array(binaryStr.length);
-                    for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
-                    await vault.createBinary(normalized, bytes.buffer);
+                  if (isBinaryPath(remote.path)) {
+                    try {
+                      const binaryStr = atob(final);
+                      const bytes = new Uint8Array(binaryStr.length);
+                      for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+                      await vault.createBinary(normalized, bytes.buffer);
+                    } catch {
+                      await vault.create(normalized, final);
+                    }
                   } else {
                     await vault.create(normalized, final);
                   }
                 }
               }
+              remoteShaForPath.set(remote.path, remote.sha);
               const newFile = vault.getAbstractFileByPath(normalized);
               if (newFile instanceof TFile) syncedFiles.push(newFile);
               console.log(`[LM] pull create: ${remote.path}`);
@@ -2581,11 +3060,20 @@ export default class QuildenSyncPlugin extends Plugin {
       this.pulling = false;
     }
 
-    if (syncedFiles.length > 0) {
-      this.ensureSyncStateRepoKey();
-      this.markFilesSynced(syncedFiles);
-      await this.savePluginData();
+    // Show one-time notice directing user to set up encryption
+    if (encryptedNoKeyCount > 0 && !this._encryptedNoKeyNoticeShown) {
+      this._encryptedNoKeyNoticeShown = true;
+      new EncryptedPullNoticeModal(this.app, encryptedNoKeyCount, () => {
+        (this.app as any).setting?.open?.();
+        (this.app as any).setting?.openTabById?.("quilden-sync");
+      }).open();
     }
+
+    this.ensureSyncStateRepoKey();
+    // Persist remoteSha for all processed files (updates, creates, and encrypted-no-key skips).
+    const needsSave = syncedFiles.length > 0 || remoteShaForPath.size > 0;
+    if (syncedFiles.length > 0) this.markFilesSynced(syncedFiles, remoteShaForPath);
+    if (needsSave) await this.savePluginData();
 
     console.log(`[LM] pullChanges done: created=${created} updated=${updated} unchanged=${unchanged}`);
     const pulled = created + updated;
@@ -2611,6 +3099,124 @@ function confirmDialog(app: App, title: string, message: string): Promise<boolea
     });
     modal.open();
   });
+}
+
+// ── Encrypted-file unlock modal ───────────────────────────────────────────────
+// Shown when a local file contains QENC-encrypted content but no key is loaded.
+// The user enters their password; on success the file is decrypted in place.
+class EncryptedPullNoticeModal extends Modal {
+  constructor(
+    app: App,
+    private count: number,
+    private openSettings: () => void,
+  ) {
+    super(app);
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl("h2", { text: "Encrypted files found" });
+    contentEl.createEl("p", {
+      text: `${this.count} file(s) synced from GitHub are encrypted and cannot be read without your encryption password.`,
+    });
+    contentEl.createEl("p", {
+      text: "Open plugin settings to set up encryption. You can either enter your password to automatically decrypt files as they sync, or decrypt all existing files at once.",
+    });
+    const btns = contentEl.createDiv({ cls: "modal-button-container" });
+    const primary = btns.createEl("button", { text: "Open Encryption Settings", cls: "mod-cta" });
+    primary.onclick = () => { this.close(); this.openSettings(); };
+    const dismiss = btns.createEl("button", { text: "Dismiss" });
+    dismiss.onclick = () => this.close();
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+class EncryptedFileModal extends Modal {
+  private file: TFile;
+  private plugin: QuildenSyncPlugin;
+  private onDecrypted: () => void;
+
+  constructor(app: App, file: TFile, plugin: QuildenSyncPlugin, onDecrypted: () => void) {
+    super(app);
+    this.file = file;
+    this.plugin = plugin;
+    this.onDecrypted = onDecrypted;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("lm-enc-modal");
+
+    contentEl.createEl("h3", { text: "🔒 Encrypted file" });
+    contentEl.createEl("p", {
+      text: `"${this.file.name}" is encrypted. Enter your encryption password to decrypt and open it.`,
+      cls: "lm-enc-desc",
+    });
+
+    const pwInput = contentEl.createEl("input", { type: "password", placeholder: "Encryption password", cls: "lm-enc-input" });
+    const errorEl = contentEl.createEl("p", { cls: "lm-enc-error" });
+    const btnRow = contentEl.createDiv({ cls: "lm-enc-btns" });
+    const decryptBtn = btnRow.createEl("button", { text: "Decrypt & open", cls: "mod-cta lm-enc-btn" });
+    btnRow.createEl("button", { text: "Cancel" }).addEventListener("click", () => this.close());
+
+    const attempt = async () => {
+      const password = pwInput.value.trim();
+      if (!password) { errorEl.setText("Enter a password."); return; }
+
+      decryptBtn.disabled = true;
+      decryptBtn.textContent = "Decrypting…";
+      errorEl.setText("");
+
+      try {
+        const { githubUsername: login, repoOwner: owner, repoName: repo } = this.plugin.settings;
+        const salt = await contextSalt(login, owner, repo);
+        const candidateKey = await buildKey(password, salt);
+
+        // Temporarily use this key to try decrypting
+        const prevKey = derivedKey;
+        derivedKey = candidateKey;
+        const content = await this.app.vault.read(this.file);
+        const dec = await decryptContent(content);
+        derivedKey = prevKey; // restore
+
+        if (dec === null) {
+          errorEl.setText("Wrong password — could not decrypt.");
+          decryptBtn.disabled = false;
+          decryptBtn.textContent = "Decrypt & open";
+          return;
+        }
+
+        // Write decrypted content — suppress sync push
+        this.plugin.pulling = true;
+        try {
+          await this.app.vault.modify(this.file, dec);
+          if (this.plugin.syncState?.files) delete this.plugin.syncState.files[this.file.path];
+          await this.plugin.savePluginData();
+        } finally {
+          this.plugin.pulling = false;
+        }
+
+        this.close();
+        this.onDecrypted();
+      } catch (e: any) {
+        errorEl.setText(`Error: ${e.message}`);
+        decryptBtn.disabled = false;
+        decryptBtn.textContent = "Decrypt & open";
+      }
+    };
+
+    decryptBtn.addEventListener("click", attempt);
+    pwInput.addEventListener("keydown", (e) => { if (e.key === "Enter") attempt(); });
+
+    // Focus password input after modal animates in
+    setTimeout(() => pwInput.focus(), 50);
+  }
+
+  onClose() { this.contentEl.empty(); }
 }
 
 class QuildenSyncSettingTab extends PluginSettingTab {
@@ -2895,10 +3501,10 @@ class QuildenSyncSettingTab extends PluginSettingTab {
         }
 
         const repoContentSetting = new Setting(pwGroup)
-          .setName("Existing repo content")
+          .setName("GitHub repo content")
           .setDesc(
             derivedKey
-              ? "Apply or remove encryption on files already in your GitHub repo."
+              ? "Encrypt or decrypt files already stored in your GitHub repo. This re-uploads all matching files."
               : "Unlock encryption above first."
           );
 
@@ -2929,6 +3535,28 @@ class QuildenSyncSettingTab extends PluginSettingTab {
                 if (!confirmed) return;
                 try {
                   await this.plugin.decryptExistingContent();
+                } catch (e) {
+                  new Notice(`Failed: ${e instanceof Error ? e.message : "Unknown error"}`);
+                }
+              })
+            );
+
+          new Setting(pwGroup)
+            .setName("Repair local vault")
+            .setDesc(
+              "Scan and decrypt any files in your local vault that still contain QENC-encrypted content. Also repairs images and PDFs accidentally stored as encrypted blobs. No GitHub calls — local only."
+            )
+            .addButton((btn) =>
+              btn.setButtonText("Repair local files").onClick(async () => {
+                const confirmed = await confirmDialog(
+                  this.app,
+                  "Repair local vault",
+                  "This will scan your entire local vault, decrypt any QENC-encrypted text files, and restore any images or PDFs accidentally stored as encrypted blobs. Continue?"
+                );
+                if (!confirmed) return;
+                try {
+                  await this.plugin.decryptLocalVaultFiles();
+                  await this.plugin.repairEncryptedMediaFiles();
                 } catch (e) {
                   new Notice(`Failed: ${e instanceof Error ? e.message : "Unknown error"}`);
                 }
@@ -3405,11 +4033,12 @@ class QuildenSyncSettingTab extends PluginSettingTab {
                 stopPolling();
                 return;
               }
-              const data = res.json as { status: string; token?: string; login?: string };
+              const data = res.json as { status: string; token?: string; refreshToken?: string | null; login?: string };
 
               if (data.status === "ok" && data.token && data.login) {
                 stopPolling();
                 this.plugin.settings.githubToken = data.token;
+                this.plugin.settings.githubRefreshToken = data.refreshToken ?? "";
                 this.plugin.settings.githubUsername = data.login;
                 await this.plugin.saveSettings();
                 new Notice(`Quilden Sync: Connected as @${data.login} ✓`);
