@@ -521,6 +521,12 @@ class GitHubAPI {
       headers: apiHeaders(token, apiBase),
       throw: false,
     });
+    console.log(`[Quilden] verifyToken status=${res.status} body=`, JSON.stringify(res.json ?? res.text ?? "").slice(0, 200));
+    if (res.status === 403) {
+      const msg = res.json?.message ?? "";
+      if (msg.includes("scope")) throw new Error(`Token missing required scopes. Enable user (Read) + repository (Read and Write) when generating the token.`);
+      throw new Error(`Token rejected (403). Check scopes: user (Read) + repository (Read and Write).`);
+    }
     if (res.status !== 200) throw new Error(`Invalid token (${res.status})`);
     return res.json;
   }
@@ -528,7 +534,7 @@ class GitHubAPI {
   static async fetchRepos(token: string, apiBase = "https://api.github.com"): Promise<Array<{ full_name: string; private: boolean }>> {
     const isGitea = apiBase !== "https://api.github.com";
     const url = isGitea
-      ? `${apiBase}/repos/search?limit=50&sort=newest&token=${encodeURIComponent(token)}`
+      ? `${apiBase}/repos/search?limit=50&sort=updated&order=desc&token=${encodeURIComponent(token)}`
       : `${apiBase}/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator`;
     const res = await requestUrl({ url, method: "GET", headers: apiHeaders(token, apiBase), throw: false });
     const scopes = res.headers?.["x-oauth-scopes"] ?? "n/a";
@@ -577,10 +583,20 @@ class GitHubAPI {
   }
 
   async getTree(): Promise<{ blobs: Array<{ path: string; sha: string; type: string }>; truncated: boolean }> {
-    const data = await this.request(
-      "GET",
-      `/repos/${this.owner}/${this.repo}/git/trees/${encodeURIComponent(this.branch)}?recursive=true`
-    );
+    let data: any;
+    try {
+      data = await this.request(
+        "GET",
+        `/repos/${this.owner}/${this.repo}/git/trees/${encodeURIComponent(this.branch)}?recursive=true`
+      );
+    } catch (e: any) {
+      // Empty repo — branch doesn't exist yet (GitHub/Gitea returns 404 or 400 with "sha not found")
+      if (e?.message?.includes("404") || e?.message?.includes("400") || e?.message?.includes("sha not found") || e?.message?.includes("not found")) {
+        console.log("[LM] getTree: empty repo detected, treating as no remote files");
+        return { blobs: [], truncated: false };
+      }
+      throw e;
+    }
     return {
       blobs: (data.tree || []).filter((item: any) => item.type === "blob"),
       truncated: !!data.truncated,
@@ -643,10 +659,11 @@ class GitHubAPI {
   }
 
   async createTree(baseTreeSha: string, items: Array<{ path: string; sha: string | null; mode: string }>): Promise<string> {
-    const data = await this.request("POST", `/repos/${this.owner}/${this.repo}/git/trees`, {
-      base_tree: baseTreeSha,
+    const body: Record<string, unknown> = {
       tree: items.map((i) => ({ path: i.path, mode: i.mode, type: "blob", sha: i.sha })),
-    });
+    };
+    if (baseTreeSha) body.base_tree = baseTreeSha; // omit for initial commit (empty repo)
+    const data = await this.request("POST", `/repos/${this.owner}/${this.repo}/git/trees`, body);
     return data.sha;
   }
 
@@ -659,11 +676,39 @@ class GitHubAPI {
     return data.sha;
   }
 
+  /** Create a root commit (no parents) for an empty repo. */
+  async createInitialCommit(message: string, treeSha: string): Promise<string> {
+    const data = await this.request("POST", `/repos/${this.owner}/${this.repo}/git/commits`, {
+      message,
+      tree: treeSha,
+      parents: [],
+    });
+    return data.sha;
+  }
+
   async updateRef(sha: string): Promise<void> {
     await this.request("PATCH", `/repos/${this.owner}/${this.repo}/git/refs/heads/${encodeURIComponent(this.branch)}`, {
       sha,
       force: true,
     });
+  }
+
+  /** Create a new branch ref (used when the repo has no commits yet). */
+  async createRef(sha: string): Promise<void> {
+    await this.request("POST", `/repos/${this.owner}/${this.repo}/git/refs`, {
+      ref: `refs/heads/${this.branch}`,
+      sha,
+    });
+  }
+
+  /** True if the branch doesn't exist yet (empty repo or new branch). */
+  async isBranchEmpty(): Promise<boolean> {
+    try {
+      await this.getRef();
+      return false;
+    } catch {
+      return true;
+    }
   }
 
   async getFileCommits(path: string): Promise<Array<{ sha: string; parentSha: string | null; message: string; author: string; date: string }>> {
@@ -2612,7 +2657,12 @@ export default class QuildenSyncPlugin extends Plugin {
       return;
     }
     if (!this.isConfigured()) {
-      new Notice("Quilden Sync: Please connect GitHub first.");
+      const provider = this.settings.provider === "gitea" ? "Gitea" : "GitHub";
+      if (!this.settings.githubToken) {
+        new Notice(`Quilden Sync: Please connect ${provider} first.`);
+      } else {
+        new Notice("Quilden Sync: Please select a repository in settings first.");
+      }
       return;
     }
 
@@ -2881,9 +2931,10 @@ export default class QuildenSyncPlugin extends Plugin {
 
     // Upload all blobs concurrently (8 workers), then create a single tree,
     // commit, and ref update — exactly like a standard `git commit`.
-    const currentSha = await api.getRef();
-    const { treeSha } = await api.getCommit(currentSha);
-    console.log(`[LM] base tree SHA: ${treeSha}`);
+    const isEmpty = await api.isBranchEmpty();
+    const currentSha = isEmpty ? null : await api.getRef();
+    const baseTreeSha = isEmpty ? "" : (await api.getCommit(currentSha!)).treeSha;
+    console.log(`[LM] base tree SHA: ${baseTreeSha || "(empty repo)"}`);
 
     const deletionItems: Array<{ path: string; sha: null; mode: string }> =
       remoteDeletions.map(p => ({ path: p, sha: null, mode: "100644" }));
@@ -2894,21 +2945,21 @@ export default class QuildenSyncPlugin extends Plugin {
       : [];
     const treeItems = [...uploadedItems, ...deletionItems];
 
-    const newTreeSha = await api.createTree(treeSha, treeItems);
+    const newTreeSha = isEmpty
+      ? await api.createTree("", treeItems)
+      : await api.createTree(baseTreeSha, treeItems);
     console.log(`[LM] new tree SHA: ${newTreeSha}`);
 
-    if (newTreeSha === treeSha) {
+    if (!isEmpty && newTreeSha === baseTreeSha) {
       console.log("[LM] push done — tree unchanged, no commit needed");
       changedFilesToPush.forEach((f) => this.dirtyPaths.delete(f.path));
       this.markFilesSynced(changedFilesToPush.map((f) => f.file));
     } else {
       const timestamp = new Date().toISOString().slice(0, 19).replace("T", " ");
-      const commitSha = await api.createCommit(
-        `${this.settings.commitMessage} - ${timestamp}`,
-        newTreeSha,
-        currentSha,
-      );
-      await api.updateRef(commitSha);
+      const commitSha = isEmpty
+        ? await api.createInitialCommit(`${this.settings.commitMessage} - ${timestamp}`, newTreeSha)
+        : await api.createCommit(`${this.settings.commitMessage} - ${timestamp}`, newTreeSha, currentSha!);
+      isEmpty ? await api.createRef(commitSha) : await api.updateRef(commitSha);
       changedFilesToPush.forEach((f) => {
         this.dirtyPaths.delete(f.path);
         this._syncPushedPaths.push(f.path);
@@ -3924,11 +3975,17 @@ class QuildenSyncSettingTab extends PluginSettingTab {
             this.display();
           });
         })
-        .addButton((btn) =>
-          btn.setButtonText("Manage on GitHub").onClick(() => {
-            window.open(`${QUILDEN_BASE}/api/auth/manage-repos`, "_blank");
-          })
-        );
+        .addButton((btn) => {
+          if (settings.provider === "gitea") {
+            btn.setButtonText("Open Gitea").onClick(() => {
+              window.open(settings.giteaBaseUrl, "_blank");
+            });
+          } else {
+            btn.setButtonText("Manage on GitHub").onClick(() => {
+              window.open(`${QUILDEN_BASE}/api/auth/manage-repos`, "_blank");
+            });
+          }
+        });
 
       const populateDropdown = () => {
         if (!repoDropdown) return;
@@ -4051,7 +4108,7 @@ class QuildenSyncSettingTab extends PluginSettingTab {
 
       new Setting(containerEl)
         .setName("Personal Access Token")
-        .setDesc("Generate a token in Gitea → Settings → Applications.")
+        .setDesc("Gitea → Settings → Applications. Required scopes: user (Read) + repository (Read and Write).")
         .addText((t) => {
           t.setPlaceholder("Gitea access token");
           t.inputEl.type = "password";
@@ -4075,7 +4132,11 @@ class QuildenSyncSettingTab extends PluginSettingTab {
                 giteaStatusEl.setText("Invalid URL format.");
                 return;
               }
+              const requestUrl2 = `${apiBase}/user`;
+              const headers = apiHeaders(pat, apiBase);
+              console.log("[Quilden] Gitea connect attempt:", { url, apiBase, requestUrl: requestUrl2, headers: { ...headers, Authorization: headers.Authorization?.replace(/token .+/, "token [REDACTED]") } });
               const user = await GitHubAPI.verifyToken(pat, apiBase);
+              console.log("[Quilden] Gitea connect success:", user);
               settings.githubToken = pat;
               settings.githubUsername = user.login;
               settings.giteaBaseUrl = new URL(url).origin;
@@ -4084,6 +4145,7 @@ class QuildenSyncSettingTab extends PluginSettingTab {
               new Notice(`Quilden Sync: Connected to Gitea as @${user.login} ✓`);
               this.display();
             } catch (e: any) {
+              console.error("[Quilden] Gitea connect error:", e);
               giteaStatusEl.setText(`Connection failed: ${e.message}`);
             } finally {
               btn.setDisabled(false);
