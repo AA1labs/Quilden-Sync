@@ -2527,12 +2527,7 @@ export default class QuildenSyncPlugin extends Plugin {
     if (foundEncrypted) {
       new Notice("Quilden Sync: Password verified ✓");
     } else {
-      new Notice(
-        "Quilden Sync: Encryption set up ✓\n\n" +
-        "⚠️ Keep your password safe — it cannot be changed later. " +
-        "Losing it means your encrypted files cannot be recovered.",
-        12000
-      );
+      new Notice("Quilden Sync: Password accepted — no encrypted files found in the repo.");
     }
     this.clearEncryptedSyncState();
     this.scanAndFixLocalQENC();
@@ -3434,7 +3429,7 @@ class QuildenSyncSettingTab extends PluginSettingTab {
             "This decrypts all previously-encrypted files (repo + local vault) and re-saves them as plain text. This is one-way. Continue?"
           );
           if (!confirmed) return;
-          const unlocked = await this.plugin.tryUnlockEncryption(decPassword);
+          const unlocked = await this.plugin.tryUnlockEncryption(decPassword.trim());
           if (!unlocked) return; // tryUnlockEncryption shows its own error Notice
           try {
             await this.plugin.decryptExistingContent();
