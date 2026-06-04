@@ -517,7 +517,9 @@ class GitHubAPI {
     if (res.status >= 400) {
       const msg = parsed?.message ?? res.text?.slice(0, 200) ?? res.status;
       console.error(`[LM] API ${method} ${path} → ${res.status}:`, msg);
-      throw new Error(`GitHub API error ${res.status} on ${method} ${path}: ${msg}`);
+      const err = new Error(`GitHub API error ${res.status} on ${method} ${path}: ${msg}`) as Error & { status: number };
+      err.status = res.status;
+      throw err;
     }
     return parsed;
   }
@@ -3058,10 +3060,12 @@ export default class QuildenSyncPlugin extends Plugin {
 
     // Gitea's Git Data API (/git/blobs, /git/trees, etc.) requires at least one
     // commit to exist before it accepts requests. Initialize via the Contents API.
+    let justInitialized = false;
     if (isEmpty) {
       console.log("[LM] empty repo detected — initializing via Contents API");
       await api.initializeRepo();
       isEmpty = false;
+      justInitialized = true;
     }
 
     const currentSha = await api.getRef();
@@ -3071,14 +3075,21 @@ export default class QuildenSyncPlugin extends Plugin {
     const deletionItems: Array<{ path: string; sha: null; mode: string }> =
       remoteDeletions.map(p => ({ path: p, sha: null, mode: "100644" }));
 
-    // Also remove the placeholder file created during initialization
-    const placeholderItem: { path: string; sha: null; mode: string } = { path: ".gitkeep", sha: null, mode: "100644" };
+    // Remove the ".gitkeep" placeholder created during initialization, but ONLY
+    // when it actually exists in the base tree. A null-sha tree entry for a path
+    // that isn't in the base tree makes GitHub reject the whole request with
+    // 422 GitRPC::BadObjectState. The placeholder is present right after we
+    // initialize an empty repo (justInitialized), or if a previous run left it
+    // behind (then it shows up in the fetched remote tree).
+    if (justInitialized || remoteShaByPath.has(".gitkeep")) {
+      deletionItems.push({ path: ".gitkeep", sha: null, mode: "100644" });
+    }
 
     console.log(`[LM] uploading ${changedFilesToPush.length} blob(s)`);
     const uploadedItems = changedFilesToPush.length > 0
       ? await uploadBatchBlobs(api, changedFilesToPush, 1)
       : [];
-    const treeItems = [...uploadedItems, ...deletionItems, placeholderItem];
+    const treeItems = [...uploadedItems, ...deletionItems];
 
     const newTreeSha = await api.createTree(baseTreeSha, treeItems);
     console.log(`[LM] new tree SHA: ${newTreeSha}`);
