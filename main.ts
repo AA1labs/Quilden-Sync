@@ -176,15 +176,6 @@ function fromBase64(b64: string): Uint8Array {
   return bytes;
 }
 
-async function encryptContent(plaintext: string): Promise<string> {
-  if (!derivedKey) throw new Error("Encryption not configured");
-  const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
-  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, derivedKey, new TextEncoder().encode(plaintext));
-  const combined = new Uint8Array(IV_LENGTH + ciphertext.byteLength);
-  combined.set(iv, 0);
-  combined.set(new Uint8Array(ciphertext), IV_LENGTH);
-  return ENCRYPTED_PREFIX + toBase64(combined);
-}
 
 const LEGACY_ENCRYPTED_PREFIX = "LMENC:1:";
 
@@ -238,10 +229,9 @@ async function verifyOrInitEncryption(
     return { ok: false, token: null, isNew: false };
   }
 
-  // First time — accept the password and create the token.
+  // First time — accept the password. No new encryption token is created (encryption retired).
   derivedKey = candidateKey;
-  const token = await encryptContent(ENCRYPTION_VERIFY_PLAINTEXT);
-  return { ok: true, token, isNew: true };
+  return { ok: true, token: null, isNew: true };
 }
 
 // Compute the same SHA-1 git uses for blob objects: SHA1("blob {size}\0{content}")
@@ -2114,69 +2104,6 @@ export default class QuildenSyncPlugin extends Plugin {
     return this.getEffectiveExcludePatterns().some((pattern) => path.startsWith(pattern) || path.includes("/" + pattern));
   }
 
-  async encryptExistingContent(): Promise<void> {
-    if (!this.isConfigured()) {
-      new Notice("Configure GitHub connection first.");
-      return;
-    }
-    if (!derivedKey) {
-      new Notice("Unlock encryption first by entering your password.");
-      return;
-    }
-
-    const api = this.buildGitAPI();
-
-    new Notice("Scanning repo for unencrypted files…");
-    const { blobs: tree } = await api.getTree();
-    const filesToCheck = tree.filter((f) => shouldEncryptPath(f.path, this.settings.encryptionScope));
-
-    const toEncrypt: Array<{ path: string; content: string }> = [];
-    for (const file of filesToCheck) {
-      const { content } = await api.getFileContent(file.path);
-      if (isEncryptedContent(content)) continue; // already encrypted (any key) — skip to avoid double-encryption
-      if (isBinaryPath(file.path)) {
-        // Unencrypted binary: read raw bytes, encode as base64 for encryption
-        const { buffer } = await api.getBinaryContent(file.path);
-        const bytes = new Uint8Array(buffer);
-        let binary = "";
-        bytes.forEach((b) => (binary += String.fromCharCode(b)));
-        toEncrypt.push({ path: file.path, content: btoa(binary) });
-      } else {
-        toEncrypt.push({ path: file.path, content });
-      }
-    }
-
-    if (toEncrypt.length === 0) {
-      new Notice("All markdown files are already encrypted.");
-      return;
-    }
-
-    new Notice(`Encrypting ${toEncrypt.length} file(s)…`);
-
-    const BATCH_SIZE = 50;
-    for (let i = 0; i < toEncrypt.length; i += BATCH_SIZE) {
-      const batch = toEncrypt.slice(i, i + BATCH_SIZE);
-      const latestSha = await api.getRef();
-      const { treeSha } = await api.getCommit(latestSha);
-      const treeItems = await Promise.all(
-        batch.map(async (f) => ({
-          path: f.path,
-          sha: await api.createBlob(await encryptContent(f.content)),
-          mode: "100644",
-        }))
-      );
-      const newTreeSha = await api.createTree(treeSha, treeItems);
-      const commitSha = await api.createCommit(
-        "Quilden: Encrypt existing content",
-        newTreeSha,
-        latestSha
-      );
-      await api.updateRef(commitSha);
-    }
-
-    new Notice(`✓ Encrypted ${toEncrypt.length} file(s) successfully.`);
-  }
-
   async decryptExistingContent(): Promise<void> {
     if (!this.isConfigured()) {
       new Notice("Configure GitHub connection first.");
@@ -2191,7 +2118,7 @@ export default class QuildenSyncPlugin extends Plugin {
 
     new Notice("Scanning repo for encrypted files…");
     const { blobs: tree } = await api.getTree();
-    const filesToCheck = tree.filter((f) => shouldEncryptPath(f.path, this.settings.encryptionScope));
+    const filesToCheck = tree;
 
     const toDecrypt: Array<{ path: string; content: string; binary: boolean }> = [];
     for (const file of filesToCheck) {
@@ -2593,15 +2520,9 @@ export default class QuildenSyncPlugin extends Plugin {
     if (foundEncrypted && !passwordCorrect) return; // already notified above
 
     // Password accepted — either verified via md file, or no encrypted files yet (first setup).
+    // Encryption is retired: no new verify token is created or uploaded.
     derivedKey = candidateKey;
-    const token = await encryptContent(ENCRYPTION_VERIFY_PLAINTEXT);
-    this.encryptionVerifyToken = token;
     await this.savePluginData();
-
-    // Upload verify file so future new-device logins skip the md sampling.
-    try {
-      await api.putFile(VERIFY_PATH, token, "chore: add Quilden encryption verification token");
-    } catch { /* non-critical — md sampling is the fallback */ }
 
     if (foundEncrypted) {
       new Notice("Quilden Sync: Password verified ✓");
@@ -2924,7 +2845,7 @@ export default class QuildenSyncPlugin extends Plugin {
         filesToPush.push({ file, path: file.path, content: b64, encoding: "base64" });
       } else {
         const content = await this.app.vault.read(file);
-        // Store plaintext — encryption happens later only for files that actually changed.
+        // Store plaintext content for SHA comparison and upload.
         filesToPush.push({ file, path: file.path, content, encoding: "utf-8" });
       }
     }
@@ -3714,21 +3635,6 @@ class QuildenSyncSettingTab extends PluginSettingTab {
 
         if (derivedKey) {
           repoContentSetting
-            .addButton((btn) =>
-              btn.setButtonText("Encrypt all").onClick(async () => {
-                const confirmed = await confirmDialog(
-                  this.app,
-                  "Encrypt existing repo content",
-                  "This will re-upload all matching unencrypted files in your GitHub repo with encryption applied. Files already encrypted will be skipped. Continue?"
-                );
-                if (!confirmed) return;
-                try {
-                  await this.plugin.encryptExistingContent();
-                } catch (e) {
-                  new Notice(`Failed: ${e instanceof Error ? e.message : "Unknown error"}`);
-                }
-              })
-            )
             .addButton((btn) =>
               btn.setButtonText("Decrypt all").onClick(async () => {
                 const confirmed = await confirmDialog(
