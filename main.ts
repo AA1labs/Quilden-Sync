@@ -2424,12 +2424,12 @@ export default class QuildenSyncPlugin extends Plugin {
     this._encryptedNoKeyNoticeShown = false;
   }
 
-  async tryUnlockEncryption(password: string): Promise<void> {
-    if (!password) return;
+  async tryUnlockEncryption(password: string): Promise<boolean> {
+    if (!password) return false;
     const { githubUsername, repoOwner, repoName, branch, githubToken } = this.settings;
     if (!githubUsername || !repoOwner || !repoName) {
       new Notice("Connect GitHub and select a repo first.");
-      return;
+      return false;
     }
 
     // ── Fast path: local verification token already stored ──────────────────
@@ -2440,10 +2440,10 @@ export default class QuildenSyncPlugin extends Plugin {
       );
       if (!result.ok) {
         new Notice("Wrong password — this vault uses a different encryption password.", 6000);
-        return;
+        return false;
       }
       new Notice("Quilden Sync: Password verified ✓");
-      return;
+      return true;
     }
 
     // ── New device: no local token — verify via repo ─────────────────────────
@@ -2468,7 +2468,7 @@ export default class QuildenSyncPlugin extends Plugin {
       const check = await tryDecrypt(repoToken);
       if (check !== ENCRYPTION_VERIFY_PLAINTEXT) {
         new Notice("Wrong password — could not verify against repo encryption file.", 6000);
-        return;
+        return false;
       }
       // Password correct via verify file.
       derivedKey = candidateKey;
@@ -2478,7 +2478,7 @@ export default class QuildenSyncPlugin extends Plugin {
       this.clearEncryptedSyncState();
       this.scanAndFixLocalQENC();
       this.runSync("pull").catch(e => console.warn("[LM] post-unlock pull failed:", e));
-      return;
+      return true;
     } catch { /* verify file missing — fall through to md sampling */ }
 
     // Step 2 — fallback: sample encrypted .md files from the remote tree
@@ -2501,7 +2501,7 @@ export default class QuildenSyncPlugin extends Plugin {
             passwordCorrect = true;
           } else {
             new Notice("Wrong password — could not decrypt existing encrypted files.", 6000);
-            return;
+            return false;
           }
           break; // one encrypted file is enough to decide
         } catch { continue; }
@@ -2512,12 +2512,12 @@ export default class QuildenSyncPlugin extends Plugin {
       const is404 = e.message?.includes("404") || e.message?.includes("Not Found");
       if (!is404) {
         new Notice(`Could not reach repo for verification: ${e.message}`, 5000);
-        return;
+        return false;
       }
       // Fall through: empty repo → accept password as new setup
     }
 
-    if (foundEncrypted && !passwordCorrect) return; // already notified above
+    if (foundEncrypted && !passwordCorrect) return false; // already notified above
 
     // Password accepted — either verified via md file, or no encrypted files yet (first setup).
     // Encryption is retired: no new verify token is created or uploaded.
@@ -2537,6 +2537,7 @@ export default class QuildenSyncPlugin extends Plugin {
     this.clearEncryptedSyncState();
     this.scanAndFixLocalQENC();
     this.runSync("pull").catch(e => console.warn("[LM] post-unlock pull failed:", e));
+    return true;
   }
 
   private openFileHistory(file: TFile) {
@@ -3347,13 +3348,9 @@ class EncryptedFileModal extends Modal {
 class QuildenSyncSettingTab extends PluginSettingTab {
   plugin: QuildenSyncPlugin;
   private showAdvanced = false;
-  private showEncryption = false;
   private allRepos: Array<{ full_name: string; private: boolean }> = [];
   private renderGeneration = 0;
   private activePollingTimer: number | null = null;
-  private unlockFeedback: { ok: boolean; msg: string } | null = null;
-  private encToggleMsg: "on" | "off" | null = null;
-  private changingPassword = false;
 
   constructor(app: App, plugin: QuildenSyncPlugin) {
     super(app, plugin);
@@ -3406,279 +3403,49 @@ class QuildenSyncSettingTab extends PluginSettingTab {
       btn.setButtonText("Sync").setCta().onClick(() => this.plugin.runSync())
     );
 
-    // ── Encryption ──
-    const encHeader = containerEl.createEl("h3", {
-      cls: "setting-item-heading quilden-collapsible-heading",
-    });
-    encHeader.style.cursor = "pointer";
+    // ── Encryption (retired) ──
+    containerEl.createEl("h3", { text: "Encryption (retired)", cls: "setting-item-heading" });
+    containerEl.createDiv({ cls: "setting-item-description" }).setText(
+      "Encryption has been removed due to compatibility conflicts. New files are now stored as " +
+      "plain text. You can still decrypt content that was encrypted previously — use “Decrypt my " +
+      "library” below. For private storage, connect a self-hosted Gitea repository in the connection " +
+      "settings above."
+    );
 
-    const encHeaderText = encHeader.createSpan({ text: this.showEncryption ? "▼ Encryption" : "▶ Encryption" });
+    let decPassword = "";
+    new Setting(containerEl)
+      .setName("Decryption password")
+      .setDesc("Enter the password you used when encryption was enabled.")
+      .addText((t) => {
+        t.inputEl.type = "password";
+        t.setPlaceholder("Old encryption password");
+        t.onChange((v) => { decPassword = v; });
+      });
 
-    // Status tag — visible even when collapsed
-    const encTag = encHeader.createSpan({ cls: "quilden-enc-tag" });
-    if (this.plugin.settings.encryptionEnabled && derivedKey) {
-      encTag.addClass("quilden-enc-tag--active");
-      setIcon(encTag, "lock");
-      encTag.createSpan({ text: "active" });
-    } else if (this.plugin.settings.encryptionEnabled) {
-      encTag.addClass("quilden-enc-tag--locked");
-      setIcon(encTag, "lock");
-      encTag.createSpan({ text: "locked" });
-    } else {
-      encTag.addClass("quilden-enc-tag--off");
-      setIcon(encTag, "lock-open");
-      encTag.createSpan({ text: "off" });
-    }
-
-    encHeader.addEventListener("click", () => {
-      this.showEncryption = !this.showEncryption;
-      this.display();
-    });
-
-    if (this.showEncryption) {
-      // ── Group 1: Status & enable toggle ──
-      const encGroup1 = containerEl.createDiv("setting-group").createDiv("setting-items");
-
-      const encStatus = encGroup1.createDiv("encryption-status");
-      if (this.plugin.settings.encryptionEnabled && derivedKey) {
-        encStatus.addClass("active");
-        const scopeLabel = this.plugin.settings.encryptionScope === "all"
-        ? "all files"
-        : this.plugin.settings.encryptionScope === "media"
-          ? "notes, images & PDFs"
-          : "markdown notes";
-      encStatus.setText(`🔒 Encryption active — ${scopeLabel} are encrypted before upload`);
-      } else if (this.plugin.settings.encryptionEnabled) {
-        encStatus.addClass("inactive");
-        encStatus.setText("🔒 Encryption enabled — enter your password below to activate");
-      } else {
-        encStatus.addClass("inactive");
-        encStatus.setText("🔓 Encryption disabled — files are stored as plain text in GitHub");
-      }
-
-      new Setting(encGroup1)
-        .setName("Enable encryption")
-        .setDesc("Encrypts files before pushing to GitHub.")
-        .addToggle((t) =>
-          t.setValue(this.plugin.settings.encryptionEnabled).onChange(async (v) => {
-            this.unlockFeedback = null;
-            this.encToggleMsg = v ? "on" : "off";
-            this.plugin.settings.encryptionEnabled = v;
-            if (!v) clearEncryptionKey();
-            await this.plugin.saveSettings();
-            this.display();
-          })
-        );
-
-      if (this.encToggleMsg === "on") {
-        encGroup1.createDiv({ cls: "enc-toggle-change-msg enc-toggle-change-msg--on",
-          text: "Encryption enabled. New syncs will encrypt matching files. Files already in GitHub are not affected — use 'Encrypt existing repo content' below to encrypt them.",
-        });
-      } else if (this.encToggleMsg === "off") {
-        encGroup1.createDiv({ cls: "enc-toggle-change-msg enc-toggle-change-msg--off",
-          text: "Encryption disabled. New syncs will push files as plain text. Files already encrypted in GitHub remain encrypted — use 'Decrypt existing repo content' below to restore them as plain text.",
-        });
-      }
-
-      if (this.plugin.settings.encryptionEnabled) {
-        const encNote = encGroup1.createDiv("enc-toggle-note");
-        if (this.plugin.hasExistingEncryption) {
-          encNote.setText("This vault already has an encryption password set. Enter it below to unlock.");
-        } else {
-          encNote.setText("⚠️ Your encryption password cannot be changed later. If you forget it, your encrypted files cannot be recovered. Choose carefully.");
-        }
-
-        new Setting(encGroup1)
-          .setName("Encrypt")
-          .setDesc("Which file types to encrypt before pushing.")
-          .addDropdown((dd) =>
-            dd
-              .addOption("markdown", "Markdown notes only")
-              .addOption("media", "Notes, images & PDFs")
-              .addOption("all", "Everything")
-              .setValue(this.plugin.settings.encryptionScope ?? "markdown")
-              .onChange(async (v) => {
-                this.plugin.settings.encryptionScope = v as "markdown" | "media" | "all";
-                await this.plugin.saveSettings();
-                this.display();
-              })
+    new Setting(containerEl)
+      .setName("Decrypt my library")
+      .setDesc("One-way: decrypts all previously-encrypted files in your repo and local vault, then re-saves them as plain text. Cannot be re-encrypted.")
+      .addButton((btn) =>
+        btn.setButtonText("Decrypt my library").setCta().onClick(async () => {
+          if (!decPassword.trim()) { new Notice("Enter your decryption password first."); return; }
+          const confirmed = await confirmDialog(
+            this.app,
+            "Decrypt entire library",
+            "This decrypts all previously-encrypted files (repo + local vault) and re-saves them as plain text. This is one-way. Continue?"
           );
-
-        // ── Group 2: Password ──
-        const pwGroup = containerEl.createDiv("setting-group").createDiv("setting-items");
-
-        const hasSaved = this.plugin.hasSavedKey;
-        const showSavedState = !derivedKey && hasSaved && !this.changingPassword;
-        const showInputState = (!derivedKey && (!hasSaved || this.changingPassword)) || (!!derivedKey && this.changingPassword);
-
-        const pwSetting = new Setting(pwGroup)
-          .setName("Vault password")
-          .setDesc(
-            derivedKey && !this.changingPassword
-              ? "Encryption is active — files are encrypted on each sync."
-              : showSavedState
-                ? "Password saved on this device — auto-applied on startup."
-                : "Enter your password to activate encryption."
-          );
-
-        if (derivedKey && !this.changingPassword) {
-          pwSetting.addButton((btn) =>
-            btn.setButtonText("Change password").onClick(() => {
-              this.changingPassword = true;
-              this.unlockFeedback = null;
-              this.display();
-            })
-          );
-        }
-
-        if (showSavedState) {
-          // Show filled-bullet placeholder + action buttons
-          const savedInput = pwSetting.controlEl.createEl("input", {
-            type: "password",
-            cls: "enc-saved-pw-display",
-          });
-          savedInput.value = "••••••••";
-          savedInput.readOnly = true;
-
-          pwSetting
-            .addButton((btn) =>
-              btn.setButtonText("Unlock").setCta().onClick(async () => {
-                this.unlockFeedback = null;
-                const ok = await this.plugin.loadAndApplyEncKey();
-                this.unlockFeedback = ok
-                  ? { ok: true, msg: "✓ Encryption unlocked." }
-                  : { ok: false, msg: "✗ Saved key is invalid. Try re-entering your password." };
-                this.display();
-              })
-            )
-            .addButton((btn) =>
-              btn.setButtonText("Change").onClick(() => {
-                this.changingPassword = true;
-                this.unlockFeedback = null;
-                this.display();
-              })
-            )
-            .addButton((btn) =>
-              btn.setButtonText("Forget").onClick(() => {
-                this.plugin.clearEncKey();
-                this.changingPassword = false;
-                this.unlockFeedback = null;
-                this.display();
-              })
-            );
-        }
-
-        if (showInputState) {
-          const doUnlock = async (password: string) => {
-            // If changing password while already unlocked, clear first so tryUnlockEncryption re-derives
-            if (derivedKey) clearEncryptionKey();
-            this.unlockFeedback = null;
-            await this.plugin.tryUnlockEncryption(password);
-            if (derivedKey) {
-              await this.plugin.saveEncKey();
-              this.changingPassword = false;
-              this.unlockFeedback = { ok: true, msg: "✓ Password verified — key saved on this device." };
-            } else {
-              this.unlockFeedback = { ok: false, msg: "✗ Wrong password. Please try again." };
-            }
-            this.display();
-          };
-
-          pwSetting.addText((text) => {
-            text.setPlaceholder("Password");
-            text.inputEl.type = "password";
-            text.inputEl.addEventListener("keydown", async (e) => {
-              if (e.key !== "Enter") return;
-              await doUnlock(text.getValue().trim());
-            });
-          });
-
-          if (this.changingPassword) {
-            pwSetting
-              .addButton((btn) =>
-                btn.setButtonText("Save new password").setCta().onClick(async () => {
-                  const input = pwSetting.controlEl.querySelector("input") as HTMLInputElement | null;
-                  await doUnlock(input?.value.trim() ?? "");
-                })
-              )
-              .addButton((btn) =>
-                btn.setButtonText("Cancel").onClick(() => {
-                  this.changingPassword = false;
-                  this.unlockFeedback = null;
-                  this.display();
-                })
-              );
-          } else {
-            pwSetting.addButton((btn) =>
-              btn.setButtonText("Unlock").onClick(async () => {
-                const input = pwSetting.controlEl.querySelector("input") as HTMLInputElement | null;
-                await doUnlock(input?.value.trim() ?? "");
-              })
-            );
+          if (!confirmed) return;
+          const unlocked = await this.plugin.tryUnlockEncryption(decPassword);
+          if (!unlocked) return; // tryUnlockEncryption shows its own error Notice
+          try {
+            await this.plugin.decryptExistingContent();
+            await this.plugin.decryptLocalVaultFiles();
+            await this.plugin.repairEncryptedMediaFiles();
+            new Notice("Library decryption complete.");
+          } catch (e) {
+            new Notice(`Failed: ${e instanceof Error ? e.message : "Unknown error"}`);
           }
-        }
-
-        if (this.unlockFeedback) {
-          pwGroup.createDiv({
-            cls: this.unlockFeedback.ok ? "enc-feedback-ok" : "enc-feedback-err",
-            text: this.unlockFeedback.msg,
-          });
-        }
-
-        const repoContentSetting = new Setting(pwGroup)
-          .setName("GitHub repo content")
-          .setDesc(
-            derivedKey
-              ? "Encrypt or decrypt files already stored in your GitHub repo. This re-uploads all matching files."
-              : "Unlock encryption above first."
-          );
-
-        if (derivedKey) {
-          repoContentSetting
-            .addButton((btn) =>
-              btn.setButtonText("Decrypt all").onClick(async () => {
-                const confirmed = await confirmDialog(
-                  this.app,
-                  "Decrypt existing repo content",
-                  "This will re-upload all encrypted files in your GitHub repo as plain text. This cannot be undone without re-encrypting. Continue?"
-                );
-                if (!confirmed) return;
-                try {
-                  await this.plugin.decryptExistingContent();
-                } catch (e) {
-                  new Notice(`Failed: ${e instanceof Error ? e.message : "Unknown error"}`);
-                }
-              })
-            );
-
-          new Setting(pwGroup)
-            .setName("Repair local vault")
-            .setDesc(
-              "Scan and decrypt any files in your local vault that still contain QENC-encrypted content. Also repairs images and PDFs accidentally stored as encrypted blobs. No GitHub calls — local only."
-            )
-            .addButton((btn) =>
-              btn.setButtonText("Repair local files").onClick(async () => {
-                const confirmed = await confirmDialog(
-                  this.app,
-                  "Repair local vault",
-                  "This will scan your entire local vault, decrypt any QENC-encrypted text files, and restore any images or PDFs accidentally stored as encrypted blobs. Continue?"
-                );
-                if (!confirmed) return;
-                try {
-                  await this.plugin.decryptLocalVaultFiles();
-                  await this.plugin.repairEncryptedMediaFiles();
-                } catch (e) {
-                  new Notice(`Failed: ${e instanceof Error ? e.message : "Unknown error"}`);
-                }
-              })
-            );
-        } else {
-          repoContentSetting.addButton((btn) =>
-            btn.setButtonText("Locked").setDisabled(true)
-          );
-        }
-      }
-    }
+        })
+      );
 
     // ── Advanced ──
     const advHeader = containerEl.createEl("h3", {
