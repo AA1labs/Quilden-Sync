@@ -2921,10 +2921,7 @@ export default class QuildenSyncPlugin extends Plugin {
         let binary = "";
         bytes.forEach((b) => (binary += String.fromCharCode(b)));
         const b64 = btoa(binary);
-        const willEncrypt = this.settings.encryptionEnabled && !!derivedKey
-          && shouldEncryptPath(file.path, this.settings.encryptionScope);
-        // If encrypting, tag as utf-8 so the QENC ciphertext is pushed as text; otherwise base64 binary.
-        filesToPush.push({ file, path: file.path, content: b64, encoding: willEncrypt ? "utf-8" : "base64" });
+        filesToPush.push({ file, path: file.path, content: b64, encoding: "base64" });
       } else {
         const content = await this.app.vault.read(file);
         // Store plaintext — encryption happens later only for files that actually changed.
