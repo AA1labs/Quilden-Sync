@@ -1,9 +1,9 @@
 {
   "id": "quilden-sync",
   "name": "Quilden Sync",
-  "version": "1.1.11",
+  "version": "1.1.12",
   "minAppVersion": "1.0.0",
-  "description": "Sync your Obsidian vault with Quilden via GitHub. Supports end-to-end encryption.",
+  "description": "Sync your Obsidian vault with Quilden via GitHub or a self-hosted Gitea repository.",
   "author": "Quilden",
   "authorUrl": "https://quilden.com",
   "isDesktopOnly": false
