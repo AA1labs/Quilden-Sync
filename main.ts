@@ -2945,12 +2945,9 @@ export default class QuildenSyncPlugin extends Plugin {
     let remoteTreeTruncated = false;
 
     if (usePerFileLookup) {
-      // Fetch SHAs for non-encrypted candidates in parallel (encrypted files use mtime comparison).
-      const needsSha = filesToPush.filter(f =>
-        !(this.settings.encryptionEnabled && !!derivedKey && shouldEncryptPath(f.path, this.settings.encryptionScope))
-      );
+      // Fetch SHAs for all candidates in parallel (plaintext only; encryption removed).
       const shaEntries = await Promise.all(
-        needsSha.map(async f => {
+        filesToPush.map(async f => {
           const sha = await api.getFileSha(f.path);
           return [f.path, sha] as [string, string | null];
         })
@@ -2977,59 +2974,25 @@ export default class QuildenSyncPlugin extends Plugin {
     }> = [];
 
     for (const file of filesToPush) {
-      // Guard: never re-encrypt content that's already encrypted (e.g. pulled with a mismatched key).
-      const shouldEnc = this.settings.encryptionEnabled && !!derivedKey
-        && shouldEncryptPath(file.path, this.settings.encryptionScope)
-        && !isEncryptedContent(file.content);
-
+      const localSha = await computeGitBlobSha(file.content, file.encoding);
+      const remoteSha = remoteShaByPath.get(file.path);
+      const localDiag = candidateDiagnostics.get(file.path);
       let changed: boolean;
-      if (shouldEnc) {
-        // AES-GCM uses a random IV so each encryption of the same plaintext
-        // produces a different SHA. SHA comparison is useless here.
-        // Use mtime+size to decide whether the local file has actually changed.
-        const prev = this.syncState.files[file.path];
-        changed = !prev
-          || prev.mtime !== file.file.stat.mtime
-          || prev.size !== file.file.stat.size;
+      if (remoteSha === undefined && remoteTreeTruncated && localDiag?.reason === "missing-sync-state") {
+        changed = false;
       } else {
-        const localSha = await computeGitBlobSha(file.content, file.encoding);
-        const remoteSha = remoteShaByPath.get(file.path);
-        // When the remote tree is truncated, a missing entry may just mean
-        // the file is beyond the truncation cutoff — not that it's absent.
-        // Treat missing-sync-state files absent from a truncated tree as
-        // unchanged (they'll still be compared properly once in syncState).
-        const localDiag = candidateDiagnostics.get(file.path);
-        if (remoteSha === undefined && remoteTreeTruncated && localDiag?.reason === "missing-sync-state") {
-          changed = false; // can't verify — assume unchanged to avoid spurious upload
-        } else {
-          changed = localSha !== remoteSha;
-        }
+        changed = localSha !== remoteSha;
       }
 
-      const localDiagnostic = candidateDiagnostics.get(file.path);
-      if (localDiagnostic) {
-        remoteComparisonDiagnostics.push({ path: file.path, localReason: localDiagnostic.reason, changed });
+      if (localDiag) {
+        remoteComparisonDiagnostics.push({ path: file.path, localReason: localDiag.reason, changed });
       }
 
       if (changed) {
-        let uploadContent = file.content;
-        let uploadEncoding = file.encoding;
-        if (shouldEnc) {
-          uploadContent = await encryptContent(file.content);
-          uploadEncoding = "utf-8"; // encrypted output is always UTF-8 text
-        }
-        changedFilesToPush.push({ ...file, content: uploadContent, encoding: uploadEncoding });
+        changedFilesToPush.push({ ...file });
       } else {
-        // BUG GUARD: if encryption is enabled but the key isn't unlocked yet,
-        // don't record encryptable files as synced. They remain without sync-state so the
-        // next sync (after the user unlocks) will see them as candidates and
-        // encrypt+upload them properly.
-        const encPending = this.settings.encryptionEnabled && !derivedKey
-          && shouldEncryptPath(file.path, this.settings.encryptionScope);
-        if (!encPending) {
-          this.dirtyPaths.delete(file.path);
-          unchangedFiles.push(file.file);
-        }
+        this.dirtyPaths.delete(file.path);
+        unchangedFiles.push(file.file);
       }
     }
 
