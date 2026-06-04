@@ -130,7 +130,7 @@ async function buildKey(password: string, salt: Uint8Array): Promise<CryptoKey> 
     keyMaterial,
     { name: "AES-GCM", length: 256 },
     true,  // extractable — required to persist key bytes to data.json across restarts
-    ["encrypt", "decrypt"]
+    ["decrypt"]
   );
 }
 
@@ -157,7 +157,7 @@ async function importDerivedKey(base64: string): Promise<boolean> {
   try {
     const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
     derivedKey = await crypto.subtle.importKey(
-      'raw', bytes, { name: 'AES-GCM' }, true, ['encrypt', 'decrypt']
+      'raw', bytes, { name: 'AES-GCM' }, true, ['decrypt']
     );
     return true;
   } catch { return false; }
@@ -1552,7 +1552,7 @@ export default class QuildenSyncPlugin extends Plugin {
 
     // Auto-unlock encryption using saved key bytes (never the password).
     // Awaited so derivedKey is set before any UI or sync runs.
-    if (this.settings.encryptionEnabled && this.isConfigured()) {
+    if (this.encryptionKeyBytes && this.isConfigured()) {
       await this.loadAndApplyEncKey().catch(() => {});
     }
 
